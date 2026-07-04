@@ -79,12 +79,13 @@ def replay():
         commander_override = request.form.get("commander", "").strip()
         game_index = _int_field(request.form, "game_index", 0, minimum=0)
         max_turns = _int_field(request.form, "max_turns", DEFAULT_MAX_TURNS)
+        run_seed = _int_field(request.form, "run_seed", 0, minimum=0)
 
         if not decklist:
             raise ValueError("Missing decklist.")
 
         entries, commander_name = sim.resolve_decklist_input(decklist, commander_override)
-        replay_data = sim.replay_single_game(entries, commander_name, game_index, max_turns)
+        replay_data = sim.replay_single_game(entries, commander_name, game_index, max_turns, run_seed)
         return jsonify(replay_data)
     except (sim.DecklistError, ValueError) as e:
         return jsonify({"error": str(e)}), 400

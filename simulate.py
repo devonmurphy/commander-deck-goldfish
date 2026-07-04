@@ -207,10 +207,14 @@ def fetch_card_data(names):
     unique_names = list(dict.fromkeys(names))
     for i in range(0, len(unique_names), 75):
         batch = unique_names[i:i + 75]
+        # The collection endpoint matches split/MDFC cards by their front
+        # face's name, not the combined "Front // Back" string -- querying
+        # with the full name silently returns not_found for those layouts.
+        query_names = [n.split(" // ")[0] for n in batch]
         resp = requests.post(
             f"{SCRYFALL_ROOT}/cards/collection",
             headers=HEADERS,
-            json={"identifiers": [{"name": n} for n in batch]},
+            json={"identifiers": [{"name": n} for n in query_names]},
             timeout=15,
         )
         resp.raise_for_status()
@@ -247,7 +251,7 @@ def _parse_scryfall_card(card):
                 image_url = face_images.get("normal") or face_images.get("large") or face_images.get("small")
                 break
 
-    return {
+    parsed = {
         "name": card["name"],
         "type_line": type_line,
         "is_land": "Land" in type_line,
@@ -258,6 +262,47 @@ def _parse_scryfall_card(card):
         "produced_mana": card.get("produced_mana"),
         "image_url": image_url,
     }
+    return _apply_card_overrides(parsed)
+
+
+# A handful of real cards don't fit the generic oracle-text parsers -- exotic
+# layouts (Blazing Firesinger's "prepare" MDFC), or modal spells where we
+# just assume a specific line of play. Rather than special-case every one of
+# these deep in the simulation logic, rewrite their parsed data into a form
+# the EXISTING generic detectors (resolve_mana_profile, resolve_draw_profile)
+# already understand correctly.
+_CARD_OVERRIDES = {
+    "Blazing Firesinger // Seething Song": {
+        "type_line": "Instant",
+        "mana_cost": "{2}{R}",
+        "cmc": 3,
+        "oracle_text": "Add {R}{R}{R}{R}{R}.",
+        "produced_mana": ["R"],
+    },
+    "Ashling's Command": {
+        "oracle_text": (
+            "Create two Treasure tokens. "
+            '(They\'re artifacts with "{T}, Sacrifice this token: Add one mana of any color.") '
+            "Draw two cards."
+        ),
+        "produced_mana": ["W", "U", "B", "R", "G"],
+    },
+    "Three Steps Ahead": {
+        # Spree modes: dynamic cost handled by name in simulate_game
+        # (_three_steps_ahead_cost_and_target); this override just gets the
+        # generic draw-effect detector to pick up the "draw two, discard
+        # one" mode we always assume.
+        "oracle_text": "Draw two cards, then discard a card.",
+    },
+}
+
+
+def _apply_card_overrides(card_info):
+    overrides = _CARD_OVERRIDES.get(card_info["name"])
+    if overrides:
+        card_info.update(overrides)
+        card_info["is_land"] = "Land" in card_info["type_line"]
+    return card_info
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +443,38 @@ def resolve_draw_profile(card_info):
         "draw": _word_to_number(draw_match.group(1)),
         "discard": _word_to_number(discard_match.group(1)) if discard_match else 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Land-untap modeling (Snap, etc.) -- these effectively refund mana you
+# already spent this turn. "Untap ALL lands" (Turnabout) and "untap X
+# permanents" tied to an X cost (Reality Spasm) don't fit a fixed-count
+# regex and are special-cased directly in simulate_game by name.
+# ---------------------------------------------------------------------------
+
+_UNTAP_LANDS_RE = re.compile(r"untap (?:up to )?(a|an|one|two|three|four|five|\d+) lands?\b")
+
+
+def resolve_untap_lands(card_info):
+    """Detects fixed-count 'untap N lands' effects. Returns N or None."""
+    match = _UNTAP_LANDS_RE.search(card_info["oracle_text"].lower())
+    return _word_to_number(match.group(1)) if match else None
+
+
+def _refund_lands(count, battlefield_sources, battlefield_lands, available):
+    """Moves up to `count` currently-tapped land sources back into
+    `available` (mutated in place). "Tapped" = a land source present in
+    battlefield_sources but not currently in available."""
+    if count <= 0:
+        return 0
+    all_lands = [s for s in battlefield_sources if s["name"] in battlefield_lands]
+    tapped = list(all_lands)
+    for s in available:
+        if s["name"] in battlefield_lands and s in tapped:
+            tapped.remove(s)
+    refund = tapped[:count]
+    available.extend(refund)
+    return len(refund)
 
 
 def _choose_discard(hand, battlefield_sources):
@@ -556,7 +633,44 @@ def _matches_hold_tag(card, tag):
     return tag_lower in card["type_line"].lower() or tag_lower in card["oracle_text"].lower()
 
 
+def _compute_copy_multiplier(card, is_attacking, copies_while_attacking, is_commander_cast, battlefield_permanents):
+    """How many total times this cast resolves (1 = just the original, no
+    copying). The attack trigger provides one copy (multiplier 2); Veyran,
+    Voice of Duality doubles that again for Instant/Sorcery spells
+    specifically (its Magecraft trigger doubling), and Twinning Staff
+    doubles again for anything ("copy it that many times plus one more,"
+    stacking multiplicatively with any other doubling already in effect)."""
+    if not (is_attacking and copies_while_attacking and not is_commander_cast and _is_instant_or_flash(card)):
+        return 1
+    multiplier = 2
+    perm_names = {p.replace(" (copy)", "") for p in battlefield_permanents}
+    if "Veyran, Voice of Duality" in perm_names and ("Instant" in card["type_line"] or "Sorcery" in card["type_line"]):
+        multiplier *= 2
+    if "Twinning Staff" in perm_names:
+        multiplier *= 2
+    return multiplier
+
+
+def _three_steps_ahead_cost_and_target(battlefield_permanent_cards):
+    """Three Steps Ahead is a Spree instant: base {U}, plus optional modes.
+    We always take the "draw two, discard one" mode (+{2}), and additionally
+    the "copy target artifact" mode (+{3}) if we control a non-legendary
+    artifact to copy -- picking the highest-CMC one. Returns
+    (effective_mana_cost, target_card_or_None)."""
+    candidates = [
+        c for c in battlefield_permanent_cards
+        if "Artifact" in c["type_line"] and "Legendary" not in c["type_line"]
+    ]
+    if candidates:
+        target = max(candidates, key=lambda c: c["cmc"])
+        return "{U}{3}{2}", target
+    return "{U}{2}", None
+
+
 WIN_X_THRESHOLD = 8  # casting an X spell for this much or more counts as a "win"
+# X spells that only ever hit creatures, not players -- removal, not a
+# finisher, so a big X on these shouldn't count as "winning" the game.
+WIN_EXCLUDED_CARDS = {"Shellshock", "Street Spasm"}
 
 
 def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, profile=None, capture_frames=False):
@@ -587,6 +701,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     battlefield_sources = []  # list of {"name","colors"}, one per permanent mana source
     battlefield_lands = []  # names of lands in play
     battlefield_permanents = []  # names of nonland permanents (creatures/artifacts/etc.) in play
+    battlefield_permanent_cards = []  # full card dicts, parallel to battlefield_permanents
+    graveyard = []  # names of resolved Instants/Sorceries and discarded cards, in order
     first_cast_turn = {}
     frames = [] if capture_frames else None
     win_turn = None
@@ -644,8 +760,13 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 key=lambda c: (_cast_priority(c, commander_card), -c["cmc"]),
             )
             for card in candidates:
-                generic, pips = parse_mana_cost(card["mana_cost"])
-                has_x = _has_x_cost(card["mana_cost"])
+                three_steps_target = None
+                effective_mana_cost = card["mana_cost"]
+                if card["name"] == "Three Steps Ahead":
+                    effective_mana_cost, three_steps_target = _three_steps_ahead_cost_and_target(battlefield_permanent_cards)
+
+                generic, pips = parse_mana_cost(effective_mana_cost)
+                has_x = _has_x_cost(effective_mana_cost)
                 flash_eligible = bool(flash_mana) and _is_instant_or_flash(card)
 
                 # Treasures are always banked (they're real permanents), but
@@ -687,7 +808,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                     available = []
                     flash_mana = []
                     treasure_count = 0
-                    if win_turn is None and x_value >= WIN_X_THRESHOLD:
+                    if win_turn is None and x_value >= WIN_X_THRESHOLD and card["name"] not in WIN_EXCLUDED_CARDS:
                         win_turn = turn
 
                 is_commander_cast = commander_card is not None and card is commander_card
@@ -700,25 +821,40 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 if card["name"] not in first_cast_turn:
                     first_cast_turn[card["name"]] = turn
 
-                is_copied = is_attacking and copies_while_attacking and not is_commander_cast
+                # How many total times this resolves: 1 = no copying, 2+ if
+                # the commander's attack trigger (and Veyran/Twinning Staff
+                # doubling it further) applies. Only Instant-speed spells
+                # can be cast "while attacking" (during combat) at all.
+                copy_multiplier = _compute_copy_multiplier(
+                    card, is_attacking, copies_while_attacking, is_commander_cast, battlefield_permanents
+                )
+                extra_copies = copy_multiplier - 1
+                is_copied = extra_copies > 0
 
                 permanents_added = 0
                 if is_commander_cast or _is_permanent_type(card["type_line"]):
                     battlefield_permanents.append(card["name"])
+                    battlefield_permanent_cards.append(card)
                     permanents_added = 1
-                    if is_copied:
-                        battlefield_permanents.append(card["name"] + " (copy)")
-                        permanents_added = 2
+                    # The legend rule: extra copies of a Legendary permanent
+                    # get sacrificed immediately, so only one ever sticks
+                    # around no matter how many times it was copied.
+                    if "Legendary" not in card["type_line"]:
+                        for _ in range(extra_copies):
+                            battlefield_permanents.append(card["name"] + " (copy)")
+                            battlefield_permanent_cards.append(card)
+                            permanents_added += 1
+                else:
+                    graveyard.append(card["name"])  # Instants/Sorceries go to the graveyard once resolved
 
                 mana_profile = card.get("_mana_profile")
                 if mana_profile:
                     if mana_profile["kind"] == "treasure":
-                        treasure_count += mana_profile["amount"] * (2 if is_copied else 1)
+                        treasure_count += mana_profile["amount"] * copy_multiplier
                         treasure_colors = mana_profile["produces"]
                     else:
-                        _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])
-                        if is_copied:
-                            _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])  # copied by the attack trigger
+                        for _ in range(copy_multiplier):
+                            _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])
 
                 drew = discarded = None
                 draw_profile = card.get("_draw_profile")
@@ -727,17 +863,34 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         discarded_cards = _discard_cards(hand, draw_profile["discard"], battlefield_sources)
                         pool = [c for c in pool if not any(c is d for d in discarded_cards)]
                         discarded = len(discarded_cards)
-                    copies_to_resolve = 2 if is_copied else 1
-                    drew = draw_profile["draw"] * copies_to_resolve
+                        graveyard.extend(d["name"] for d in discarded_cards)
+                    drew = draw_profile["draw"] * copy_multiplier
                     for _ in range(drew):
                         if library:
                             hand.append(library.pop(0))
+
+                # A handful of cards do something the generic mana/draw
+                # models can't express -- refunding already-tapped lands.
+                untap_n = card.get("_untap_lands")
+                if untap_n:
+                    _refund_lands(untap_n * copy_multiplier, battlefield_sources, battlefield_lands, available)
+                if card["name"] == "Turnabout":
+                    _refund_lands(len(battlefield_lands), battlefield_sources, battlefield_lands, available)
+                if card["name"] == "Reality Spasm" and x_value:
+                    _refund_lands(x_value, battlefield_sources, battlefield_lands, available)
+                if card["name"] == "Bottle-Cap Blast":
+                    treasure_count += rng.randint(2, 4) * copy_multiplier
+                    treasure_colors = set(ALL_COLORS)
+                if card["name"] == "Three Steps Ahead" and three_steps_target is not None:
+                    battlefield_permanents.append(three_steps_target["name"] + " (copy)")
+                    battlefield_permanent_cards.append(three_steps_target)
+                    permanents_added += 1
 
                 if capture_frames:
                     cast_events.append({
                         "name": card["name"],
                         "is_commander": is_commander_cast,
-                        "is_copied": is_copied,
+                        "copy_multiplier": copy_multiplier,
                         "x_value": x_value,
                         "tapped": [{"name": s["name"], "colors": sorted(s["colors"])} for s in tapped_sources],
                         "permanents_added": permanents_added,
@@ -759,6 +912,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "lands_in_play": list(battlefield_lands),
                 "permanents_in_play": list(battlefield_permanents),
                 "hand_end": [c["name"] for c in hand],
+                "graveyard": list(graveyard),
             })
 
     return first_cast_turn, frames, win_turn
@@ -780,6 +934,7 @@ def build_library(entries, card_data, deck_colors):
             card = dict(info)
             card["_mana_profile"] = resolve_mana_profile(info, deck_colors)
             card["_draw_profile"] = resolve_draw_profile(info)
+            card["_untap_lands"] = resolve_untap_lands(info)
             library.append(card)
     return library, unknown
 
@@ -820,6 +975,7 @@ def prepare_deck(entries, commander_name):
         commander_info = dict(card_data[commander_name])
         commander_info["_mana_profile"] = resolve_mana_profile(commander_info, deck_colors)
         commander_info["_draw_profile"] = resolve_draw_profile(commander_info)
+        commander_info["_untap_lands"] = resolve_untap_lands(commander_info)
         commander_info["_firebending"] = _parse_firebending(commander_info["oracle_text"])
 
     bundle = {
@@ -833,15 +989,18 @@ def prepare_deck(entries, commander_name):
     return bundle
 
 
-def replay_single_game(entries, commander_name, game_index, max_turns, on_the_play=True, profile=None):
-    """Deterministically re-simulates one specific game (by index) with full
-    frame capture, for the web UI's game player. Returns
-    {"frames": [...], "win_turn": int_or_None, "game_index": game_index}."""
+def replay_single_game(entries, commander_name, game_index, max_turns, run_seed, on_the_play=True, profile=None):
+    """Deterministically re-simulates one specific game (by index, within a
+    given run_seed) with full frame capture, for the web UI's game player.
+    `run_seed` must match the value returned by the run_simulation() call
+    that produced the game numbering the caller is browsing -- otherwise
+    "game #N" won't refer to the same game the stats were computed from.
+    Returns {"frames": [...], "win_turn": int_or_None, "game_index": game_index}."""
     bundle = prepare_deck(entries, commander_name)
     profile = profile or find_profile_for_commander(commander_name)
     deck_cards = [dict(c) for c in bundle["library_template"]]
     commander_card = dict(bundle["commander_info"]) if bundle["commander_info"] else None
-    rng = random.Random(game_index)
+    rng = random.Random(f"{run_seed}:{game_index}")
     _, frames, win_turn = simulate_game(
         deck_cards, commander_card, max_turns, rng, on_the_play, profile, capture_frames=True
     )
@@ -865,6 +1024,11 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
     commander_info = bundle["commander_info"]
     unknown = bundle["unknown"]
 
+    # Fresh every call (unlike the per-game seed below) so repeated runs
+    # actually see different games -- games are only reproducible *within*
+    # one run, by combining this with a game index.
+    run_seed = random.SystemRandom().randrange(2**31)
+
     nonland_names = [c["name"] for c in library_template if not c["is_land"]]
     if commander_info:
         nonland_names.append(commander_info["name"])
@@ -876,7 +1040,7 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
     for game_index in range(num_games):
         deck_cards = [dict(c) for c in library_template]
         commander_card = dict(commander_info) if commander_info else None
-        rng = random.Random(game_index)
+        rng = random.Random(f"{run_seed}:{game_index}")
         first_cast, _, win_turn = simulate_game(
             deck_cards, commander_card, max_turns, rng, on_the_play, profile
         )
@@ -887,7 +1051,9 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
             winning_games.append((game_index, win_turn))
 
     default_game_index = min(winning_games, key=lambda t: t[1])[0] if winning_games else 0
-    default_replay = replay_single_game(entries, commander_name, default_game_index, max_turns, on_the_play, profile)
+    default_replay = replay_single_game(
+        entries, commander_name, default_game_index, max_turns, run_seed, on_the_play, profile
+    )
 
     stats = []
     for name in tracked_names:
@@ -909,6 +1075,13 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         })
     stats.sort(key=lambda s: (s["avg_turn"] is None, s["avg_turn"]))
 
+    win_turns = [t for _, t in winning_games]
+    avg_win_turn = sum(win_turns) / len(win_turns) if win_turns else None
+
+    card_images = {name: info["image_url"] for name, info in card_data.items() if info.get("image_url")}
+    if commander_info and commander_info.get("image_url"):
+        card_images[commander_info["name"]] = commander_info["image_url"]
+
     return {
         "num_games": num_games,
         "max_turns": max_turns,
@@ -918,7 +1091,11 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         "library_size": len(library_template),
         "stats": stats,
         "profile_file": profile.get("file"),
+        "run_seed": run_seed,
         "default_game_index": default_game_index,
         "has_winning_game": bool(winning_games),
+        "win_rate": 100.0 * len(winning_games) / num_games,
+        "avg_win_turn": avg_win_turn,
         "replay": default_replay["frames"],
+        "card_images": card_images,
     }
