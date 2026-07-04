@@ -130,9 +130,33 @@
     }
     .chip.tapped { border-color: var(--accent-2); background: rgba(245, 165, 36, 0.15); transform: scale(0.95); }
     .chip.new { border-color: var(--good); background: rgba(74, 222, 128, 0.15); animation: pop 0.3s ease; }
-    .chip.chip-img { padding: 0; width: 46px; height: 64px; overflow: hidden; }
-    .chip.chip-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
-    .chip.chip-img.tapped img { filter: brightness(0.6); }
+    .chip.chip-img { position: relative; padding: 0; width: 46px; height: 64px; overflow: hidden; transition: transform 0.25s ease; }
+    .chip.chip-img img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.2s, filter 0.2s; }
+    .chip.chip-img.tapped {
+      border-color: var(--accent-2);
+      border-width: 2px;
+      box-shadow: 0 0 10px 2px rgba(245, 165, 36, 0.75);
+      transform: rotate(90deg);
+      z-index: 2;
+    }
+    .chip.chip-img.tapped img { filter: brightness(0.55) saturate(1.4); }
+    .chip.chip-img.tapped::after {
+      content: '\21BB';
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      background: var(--accent-2);
+      color: #0d0f13;
+      font-size: 0.65rem;
+      font-weight: 900;
+      line-height: 1;
+      border-radius: 50%;
+      width: 15px;
+      height: 15px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
     @keyframes pop { from { transform: scale(0.7); opacity: 0; } to { transform: scale(1); opacity: 1; } }
     .mana-dot {
       display: inline-block;
@@ -296,6 +320,13 @@
           <input type="number" id="player-game-input" min="0" max="{{ result.num_games - 1 }}" value="{{ result.default_game_index }}">
           <button type="button" class="ghost" id="player-load-btn">Load game</button>
           <span class="spacer"></span>
+          <label for="player-speed" style="color: var(--muted); font-size: 0.8rem;">Speed</label>
+          <select id="player-speed">
+            <option value="2">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="0.5">2x</option>
+            <option value="0.25">4x</option>
+          </select>
           <button type="button" class="ghost" id="player-prev-btn">&larr; Prev turn</button>
           <button type="button" class="primary" id="player-play-btn">Play turn &#9654;</button>
           <button type="button" class="ghost" id="player-next-btn">Next turn &rarr;</button>
@@ -377,8 +408,11 @@
     {% if result %}
     (function setUpGamePlayer() {
       const MANA_COLORS = { W: '#f8f6d8', U: '#0e68ab', B: '#3a3a3a', R: '#d3202a', G: '#00733e', C: '#a9a9a9' };
-      const STEP_DELAY_MS = 1100;
-      const RESOLVE_DELAY_MS = 550;
+      const BASE_STEP_DELAY_MS = 1100;
+      const BASE_RESOLVE_DELAY_MS = 550;
+      let speedMultiplier = 1;
+      const stepDelay = () => BASE_STEP_DELAY_MS * speedMultiplier;
+      const resolveDelay = () => BASE_RESOLVE_DELAY_MS * speedMultiplier;
 
       let frames = {{ result.replay | tojson }};
       let runSeed = {{ result.run_seed }};
@@ -564,7 +598,9 @@
             highlightTapped(els.lands, c.tapped.map((t) => t.name));
             highlightTapped(els.perms, c.tapped.map((t) => t.name));
             els.floating.innerHTML = '';
-            c.tapped.forEach((t) => t.colors.forEach((col) => els.floating.appendChild(manaDot(col))));
+            // One dot per tapped SOURCE, not per color it could produce --
+            // a dual land tapped once still only ever makes one mana.
+            c.tapped.forEach((t) => els.floating.appendChild(manaDot(t.colors[0])));
             let text = `Casting ${c.name}`;
             if (c.is_commander) text += ' (commander)';
             if (c.x_value !== null) text += ` for X=${c.x_value}`;
@@ -588,7 +624,7 @@
                 if (c.discarded) drewText += `, discarded ${c.discarded}`;
                 els.narration.textContent += drewText;
               }
-            }, RESOLVE_DELAY_MS);
+            }, resolveDelay());
           } else if (step.type === 'end') {
             renderChips(els.lands, frame.lands_in_play, 0);
             renderChips(els.perms, frame.permanents_in_play, 0);
@@ -598,7 +634,7 @@
           }
 
           if (autoplay && stepIdx < steps.length) {
-            stepTimer = setTimeout(runStep, STEP_DELAY_MS);
+            stepTimer = setTimeout(runStep, stepDelay());
           }
         }
         runStep();
@@ -607,6 +643,9 @@
       document.getElementById('player-prev-btn').addEventListener('click', () => showTurn(currentTurn - 1, true));
       document.getElementById('player-next-btn').addEventListener('click', () => showTurn(currentTurn + 1, true));
       document.getElementById('player-play-btn').addEventListener('click', () => showTurn(currentTurn, true));
+      document.getElementById('player-speed').addEventListener('change', (e) => {
+        speedMultiplier = parseFloat(e.target.value);
+      });
 
       document.getElementById('player-load-btn').addEventListener('click', async () => {
         const gameIndex = parseInt(els.gameInput.value, 10) || 0;
