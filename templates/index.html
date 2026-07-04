@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commander Deck Goldfish</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a2f3a;
+      --text: #e6e8eb;
+      --muted: #9aa3ad;
+      --accent: #6ea8fe;
+      --accent-2: #f5a524;
+      --good: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); margin-top: 0; margin-bottom: 1.5rem; font-size: 0.95rem; }
+
+    form.panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.9rem;
+      margin-bottom: 1.5rem;
+    }
+    form.panel .full { grid-column: 1 / -1; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.3rem; }
+    input[type=text], input[type=number], textarea {
+      width: 100%;
+      padding: 0.5rem 0.6rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0d0f13;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-family: inherit;
+    }
+    textarea {
+      min-height: 160px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      resize: vertical;
+    }
+    .hint { color: var(--muted); font-size: 0.78rem; margin-top: 0.3rem; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      padding: 0.6rem 1.1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+    button.primary { background: var(--accent); color: #0d0f13; }
+    button.primary:hover { filter: brightness(1.08); }
+
+    .error {
+      background: #3a1a1a;
+      border: 1px solid #7a2e2e;
+      color: #ffb4b4;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .warning {
+      background: #3a2f1a;
+      border: 1px solid #7a5e2e;
+      color: #ffd9a0;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; }
+    .panel h2 { margin-top: 0; font-size: 1.05rem; }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 0.75rem; }
+
+    .commander-header { display: flex; gap: 1.25rem; align-items: flex-start; }
+    .commander-header img {
+      width: 140px;
+      max-width: 35vw;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .mana-pips { display: flex; gap: 0.35rem; margin-top: 0.4rem; }
+    .mana-pips img { width: 20px; height: 20px; border: none; }
+
+    .table-scroll { overflow-x: auto; }
+    table.stats { width: 100%; border-collapse: collapse; font-size: 0.85rem; white-space: nowrap; }
+    table.stats th, table.stats td { padding: 0.4rem 0.6rem; text-align: right; border-bottom: 1px solid var(--border); }
+    table.stats th:first-child, table.stats td:first-child { text-align: left; position: sticky; left: 0; background: var(--panel); }
+    table.stats td.card-name { display: flex; align-items: center; gap: 0.5rem; }
+    table.stats td.card-name img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+    table.stats .commander-row { color: var(--accent-2); }
+    table.stats th { color: var(--muted); font-weight: 600; font-size: 0.75rem; }
+
+    pre.game-log {
+      white-space: pre-wrap;
+      font-size: 0.85rem;
+      color: var(--text);
+      background: #0d0f13;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 17, 21, 0.88);
+      backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+    #loading-overlay.show { opacity: 1; pointer-events: all; }
+    .loading-card { text-align: center; }
+    .spinner {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 1.1rem;
+      border-radius: 50%;
+      border: 5px solid var(--border);
+      border-top-color: var(--accent);
+      border-right-color: var(--accent-2);
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-title { font-weight: 600; font-size: 1.05rem; margin-bottom: 0.35rem; }
+    .loading-status { color: var(--muted); font-size: 0.9rem; }
+
+    @media (max-width: 640px) {
+      form.panel { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Commander Deck Goldfish</h1>
+    <p class="subtitle">Paste a decklist (or an Archidekt deck URL), and this plays it out solo, many times, to see how often each card is actually castable by a given turn.</p>
+
+    <form class="panel" method="post" id="goldfish-form">
+      <div class="full">
+        <label for="decklist">Decklist or Archidekt deck URL</label>
+        <textarea id="decklist" name="decklist" placeholder="1x Sol Ring&#10;1x Command Tower&#10;...&#10;&#10;or paste an https://archidekt.com/decks/... URL" required>{{ form_values.decklist }}</textarea>
+        <div class="hint">Archidekt URLs auto-detect the commander and exclude Maybeboard/Sideboard cards.</div>
+      </div>
+      <div>
+        <label for="commander">Commander name (optional override)</label>
+        <input type="text" id="commander" name="commander" placeholder="Leave blank to auto-detect or skip" value="{{ form_values.commander }}">
+      </div>
+      <div>
+        <label for="max_turns">Turns per game</label>
+        <input type="number" id="max_turns" name="max_turns" min="1" value="{{ form_values.max_turns }}">
+      </div>
+      <div class="full">
+        <label for="games">Games to simulate</label>
+        <input type="number" id="games" name="games" min="1" value="{{ form_values.games }}">
+      </div>
+      <div class="full">
+        <button type="submit" class="primary" id="goldfish-btn">Goldfish</button>
+      </div>
+    </form>
+
+    <div id="loading-overlay">
+      <div class="loading-card">
+        <div class="spinner"></div>
+        <div class="loading-title">Goldfishing...</div>
+        <div class="loading-status">Playing out your deck a bunch of times</div>
+      </div>
+    </div>
+
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+
+    {% if result %}
+      {% if result.unknown_names %}
+        <div class="warning">
+          Couldn't find on Scryfall (skipped): {{ result.unknown_names|join(", ") }}
+        </div>
+      {% endif %}
+
+      <div class="panel commander-header">
+        {% if result.commander_name and result.stats %}
+          {% for s in result.stats if s.is_commander %}
+            {% if s.image_url %}<img src="{{ s.image_url }}" alt="{{ s.name }}">{% endif %}
+          {% endfor %}
+        {% endif %}
+        <div>
+          <h2>{{ result.commander_name or "(no commander set)" }}</h2>
+          <div class="meta">
+            {{ result.library_size }}-card library &middot;
+            {{ result.num_games }} games &middot;
+            {{ result.max_turns }} turns each &middot;
+            {% if result.profile_file %}
+              profile: {{ result.profile_file }}
+            {% else %}
+              no custom profile (generic sequencing)
+            {% endif %}
+          </div>
+          <div class="mana-pips">
+            {% if result.deck_colors %}
+              {% for c in result.deck_colors %}
+                <img src="https://svgs.scryfall.io/card-symbols/{{ c }}.svg" alt="{{ c }}" title="{{ c }}">
+              {% endfor %}
+            {% else %}
+              <img src="https://svgs.scryfall.io/card-symbols/C.svg" alt="Colorless" title="Colorless">
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Cast-by-turn stats</h2>
+        <div class="meta">Average first-cast turn, and % of games each card had been cast by a given turn.</div>
+        <div class="table-scroll">
+          <table class="stats">
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Avg turn</th>
+                {% for t in range(1, result.max_turns + 1) %}
+                  <th>T{{ t }}</th>
+                {% endfor %}
+                <th>Never</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in result.stats %}
+                <tr class="{{ 'commander-row' if s.is_commander else '' }}">
+                  <td class="card-name">
+                    {% if s.image_url %}<img src="{{ s.image_url }}" alt="">{% endif %}
+                    {{ s.name }}{% if s.is_commander %} (commander){% endif %}
+                  </td>
+                  <td>{{ "%.1f"|format(s.avg_turn) if s.avg_turn is not none else "--" }}</td>
+                  {% for pct in s.pct_by_turn %}
+                    <td>{{ "%.0f"|format(pct) }}%</td>
+                  {% endfor %}
+                  <td>{{ "%.0f"|format(s.pct_never) }}%</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Sample game</h2>
+        <div class="meta">Turn-by-turn log from the first simulated game.</div>
+        <pre class="game-log">{{ result.sample_log }}</pre>
+      </div>
+    {% endif %}
+  </div>
+
+  <script>
+    document.getElementById('goldfish-form').addEventListener('submit', function (e) {
+      if (!e.target.checkValidity()) return;
+      document.getElementById('goldfish-btn').disabled = true;
+      document.getElementById('loading-overlay').classList.add('show');
+    });
+  </script>
+</body>
+</html>

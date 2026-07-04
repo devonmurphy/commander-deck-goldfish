@@ -1,0 +1,6 @@
+{
+  "commander": "Fire Lord Azula",
+  "hold_until_commander_resolves": ["Instant", "Flash"],
+  "commander_copies_spells_while_attacking": true,
+  "reserve_mana_kinds_for_x_spells": ["treasure"]
+}
