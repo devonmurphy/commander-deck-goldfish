@@ -470,6 +470,10 @@
         const parts = [`Turn ${f.turn}:`];
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
         if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
+        if (!f.win_spell) {
+          parts.push(`Mana: ${f.mana_available_end}.`);
+          if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
+        }
         if (f.casts.length) {
           const castDescs = f.casts.map((c) => {
             let d = c.name;
@@ -483,8 +487,6 @@
         } else {
           parts.push('Cast: (nothing).');
         }
-        parts.push(`Mana: ${f.mana_available_end}.`);
-        if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
         let line = escapeHtml(parts.join(' '));
         if (f.win_spell) {
           line = `<span class="win-line">${line} \u{1F3C6} WIN -- cast ${escapeHtml(f.win_spell)} for X=${f.win_x_value}!</span>`;
