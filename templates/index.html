@@ -67,6 +67,7 @@
     }
     button.primary { background: var(--accent); color: #0d0f13; }
     button.primary:hover { filter: brightness(1.08); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
 
     .error {
       background: #3a1a1a;
@@ -491,15 +492,42 @@
         clearTimeout(resolveTimer);
       }
 
+      function endOfTurnNarration(frame) {
+        let text = `End of turn ${frame.turn} -- mana available: ${frame.mana_available_end}`;
+        if (frame.treasures_banked_end) text += `, treasures banked: ${frame.treasures_banked_end}`;
+        if (frame.win_spell) text += ` \u{1F3C6} WIN -- cast ${frame.win_spell} for X=${frame.win_x_value}!`;
+        return text;
+      }
+
+      function updateNavButtons() {
+        document.getElementById('player-prev-btn').disabled = currentTurn <= 0;
+        document.getElementById('player-next-btn').disabled = currentTurn >= frames.length - 1;
+      }
+
       function showTurn(turnIndex, autoplay) {
         stopPlayback();
         currentTurn = Math.max(0, Math.min(turnIndex, frames.length - 1));
         const frame = frames[currentTurn];
         const prevFrame = currentTurn > 0 ? frames[currentTurn - 1] : null;
+        updateNavButtons();
+
+        els.turnLabel.textContent = `Turn ${frame.turn} of {{ result.max_turns }}`;
+
+        if (!autoplay) {
+          // Prev/Next jump straight to this turn's fully-resolved state --
+          // no point animating steps you're not asking to watch play out.
+          renderChips(els.lands, frame.lands_in_play, 0);
+          renderChips(els.perms, frame.permanents_in_play, 0);
+          els.floating.innerHTML = '';
+          renderChips(els.hand, frame.hand_end, 0);
+          renderChips(els.graveyard, frame.graveyard, 0);
+          els.narration.textContent = endOfTurnNarration(frame);
+          return;
+        }
+
         const prevLands = prevFrame ? prevFrame.lands_in_play : [];
         const prevPerms = prevFrame ? prevFrame.permanents_in_play : [];
 
-        els.turnLabel.textContent = `Turn ${frame.turn} of {{ result.max_turns }}`;
         renderChips(els.lands, prevLands, 0);
         renderChips(els.perms, prevPerms, 0);
         els.floating.innerHTML = '';
@@ -566,9 +594,7 @@
             renderChips(els.perms, frame.permanents_in_play, 0);
             renderChips(els.hand, frame.hand_end, 0);
             renderChips(els.graveyard, frame.graveyard, 0);
-            let text = `End of turn ${frame.turn} -- mana available: ${frame.mana_available_end}`;
-            if (frame.treasures_banked_end) text += `, treasures banked: ${frame.treasures_banked_end}`;
-            els.narration.textContent = text;
+            els.narration.textContent = endOfTurnNarration(frame);
           }
 
           if (autoplay && stepIdx < steps.length) {
@@ -578,8 +604,8 @@
         runStep();
       }
 
-      document.getElementById('player-prev-btn').addEventListener('click', () => showTurn(currentTurn - 1, false));
-      document.getElementById('player-next-btn').addEventListener('click', () => showTurn(currentTurn + 1, false));
+      document.getElementById('player-prev-btn').addEventListener('click', () => showTurn(currentTurn - 1, true));
+      document.getElementById('player-next-btn').addEventListener('click', () => showTurn(currentTurn + 1, true));
       document.getElementById('player-play-btn').addEventListener('click', () => showTurn(currentTurn, true));
 
       document.getElementById('player-load-btn').addEventListener('click', async () => {
