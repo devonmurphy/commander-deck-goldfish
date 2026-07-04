@@ -306,6 +306,11 @@ _CARD_OVERRIDES = {
         # deck) and use that single-X cost instead.
         "mana_cost": "{X}{R}",
     },
+    "Comet Storm": {
+        # Multikicker {1}, assume a 4-player pod: the first target is free,
+        # then +{1} per additional opponent to hit all 3.
+        "mana_cost": "{X}{2}{R}{R}",
+    },
 }
 
 
@@ -321,15 +326,32 @@ def _apply_card_overrides(card_info):
 # Mana modeling
 # ---------------------------------------------------------------------------
 
+_ACTIVATION_COST_PREFIX_RE = re.compile(r"((?:\{[^}]+\}, )*)\{T\}: Add")
+
+
+def _parse_activation_cost(text):
+    """Sums the generic mana cost that precedes a mana ability's {T} symbol
+    -- e.g. a Signet's leading {1} in "{1}, {T}: Add {U}{B}." (which nets
+    only +1 mana per use, not a free +2). Returns 0 for abilities that are
+    just "{T}: Add ..." with no extra cost (Sol Ring, Talismans, etc.)."""
+    match = _ACTIVATION_COST_PREFIX_RE.search(text)
+    if not match:
+        return 0
+    return sum(int(tok) for tok in _MANA_TOKEN_RE.findall(match.group(1)) if tok.isdigit())
+
+
 def resolve_mana_profile(card_info, deck_colors):
     """Figures out what a card (land, mana rock, ritual spell, mana dork --
     anything) contributes to the mana pool. Returns None if it isn't a mana
     source at all. Otherwise:
         {"kind": "permanent" | "ritual", "is_fetch": bool,
-         "fetch_colors": set(colors), "produces": set(colors), "amount": int}
+         "fetch_colors": set(colors), "produces": set(colors), "amount": int,
+         "activation_cost": int}
     "permanent" sources (lands, rocks, dorks) keep producing every future
     turn; "ritual" sources (Dark Ritual, Seething Song, ...) only add mana
-    for the turn they're cast."""
+    for the turn they're cast. `activation_cost` is generic mana that must
+    be paid EACH TIME a "permanent" source is tapped (e.g. a Signet's {1}) --
+    0 for lands and cost-free rocks, which just produce for free."""
     text = card_info["oracle_text"]
     if "Firebending" in text:
         return None  # attack-triggered, handled separately in simulate_game
@@ -343,7 +365,7 @@ def resolve_mana_profile(card_info, deck_colors):
         named_colors = {color for color, basic in BASIC_LAND_BY_COLOR.items() if basic in text}
         fetch_colors = named_colors or (set(deck_colors) or {"C"})
         return {"kind": "permanent", "is_fetch": True, "fetch_colors": fetch_colors,
-                "produces": set(), "amount": 1}
+                "produces": set(), "amount": 1, "activation_cost": 0}
 
     if "any color" in text_lower:
         treasure_match = _TREASURE_RE.search(text_lower)
@@ -352,10 +374,11 @@ def resolve_mana_profile(card_info, deck_colors):
             # stick around until sacrificed -- banked separately so they
             # carry over to later turns instead of evaporating unused.
             return {"kind": "treasure", "is_fetch": False, "fetch_colors": set(),
-                    "produces": set(deck_colors) or {"C"}, "amount": _word_to_number(treasure_match.group(1))}
+                    "produces": set(deck_colors) or {"C"}, "amount": _word_to_number(treasure_match.group(1)),
+                    "activation_cost": 0}
         return {"kind": "ritual" if is_instant_or_sorcery else "permanent",
                 "is_fetch": False, "fetch_colors": set(),
-                "produces": set(deck_colors) or {"C"}, "amount": 1}
+                "produces": set(deck_colors) or {"C"}, "amount": 1, "activation_cost": 0}
 
     if not card_info.get("produced_mana"):
         return None
@@ -364,6 +387,7 @@ def resolve_mana_profile(card_info, deck_colors):
     if not add_clauses:
         return None
 
+    activation_cost = 0
     if len(add_clauses) > 1 or any(" or " in clause for clause in add_clauses):
         # Modal ("Add {C}." / "Add {U} or {B}.") -- one mana per activation,
         # but it could be any of the colors mentioned across the options.
@@ -378,9 +402,13 @@ def resolve_mana_profile(card_info, deck_colors):
         tokens = _MANA_TOKEN_RE.findall(add_clauses[0])
         produces = set(tokens) if tokens else set(card_info["produced_mana"])
         amount = len(tokens) if tokens else 1
+        activation_cost = _parse_activation_cost(text)
 
     kind = "permanent" if is_land or not is_instant_or_sorcery else "ritual"
-    return {"kind": kind, "is_fetch": False, "fetch_colors": set(), "produces": produces, "amount": amount}
+    if kind != "permanent":
+        activation_cost = 0  # one-shot rituals just pay their cast cost, no separate activation
+    return {"kind": kind, "is_fetch": False, "fetch_colors": set(), "produces": produces,
+            "amount": amount, "activation_cost": activation_cost}
 
 
 def parse_mana_cost(mana_cost):
@@ -487,6 +515,22 @@ def _refund_lands(count, battlefield_sources, battlefield_lands, available):
     refund = tapped[:count]
     available.extend(refund)
     return len(refund)
+
+
+def _activate_costed_rocks(rocks, available):
+    """Taps each rock that has a per-use activation cost (e.g. a Signet's
+    "{1}, {T}: Add {U}{B}.") if `available` can cover it -- these aren't
+    free like a land, so they're not sitting in battlefield_sources; we pay
+    the cost and produce the mana fresh each time. Returns the updated
+    `available` list (does not mutate the input)."""
+    for rock in rocks:
+        cost = rock["activation_cost"]
+        if cost <= len(available):
+            available = available[cost:] + [
+                {"name": rock["source_name"], "colors": frozenset(rock["produces"])}
+                for _ in range(rock["amount"])
+            ]
+    return available
 
 
 def _choose_discard(hand, battlefield_sources):
@@ -617,17 +661,31 @@ def _is_permanent_type(type_line):
     return not ("Instant" in type_line or "Sorcery" in type_line)
 
 
+FLASHBACK_ENABLERS = {"Snapcaster Mage", "Past in Flames", "Underworld Breach"}
+# Sorcery-speed engine pieces with no mana ability of their own, but real
+# mechanical impact on the copy trigger -- cast in main phase, before combat,
+# so they're online for the rest of the turn (and every turn after).
+PRE_COMBAT_ENGINE_PIECES = {"Veyran, Voice of Duality", "Twinning Staff"}
+
+
 def _cast_priority(card, commander_card):
     """Lower sorts first: commander > mana sources (rituals/rocks/treasure
-    makers) > everything else > X spells (held back to mop up whatever
-    mana is left over after everything else is cast)."""
+    makers, which increase what's available) > flashback/escape enablers and
+    copy-multiplier engine pieces (Veyran, Twinning Staff -- cast main-phase
+    so graveyard rituals are recastable and the copy trigger is upgraded
+    before we commit to an X spell) > X spells (dump everything into
+    maximizing X, since our no-opponent model doesn't value anything "other
+    spells" do anyway) > everything else (only gets whatever's left, which
+    after an X spell dumps its mana is usually nothing this turn)."""
     if card is commander_card:
         return 0
-    if _has_x_cost(card["mana_cost"]):
-        return 3
     if card.get("_mana_profile"):
         return 1
-    return 2
+    if card["name"] in FLASHBACK_ENABLERS or card["name"] in PRE_COMBAT_ENGINE_PIECES:
+        return 2
+    if _has_x_cost(card["mana_cost"]):
+        return 3
+    return 4
 
 
 _FIREBENDING_RE = re.compile(r"Firebending (\d+)")
@@ -643,6 +701,26 @@ def _parse_firebending(oracle_text):
 def _matches_hold_tag(card, tag):
     tag_lower = tag.lower()
     return tag_lower in card["type_line"].lower() or tag_lower in card["oracle_text"].lower()
+
+
+def _is_instant_or_sorcery(card):
+    return "Instant" in card["type_line"] or "Sorcery" in card["type_line"]
+
+
+def _graveyard_candidates(graveyard_cards, flashback_mode, flashback_uses_left):
+    """Which graveyard cards can be (re)cast this turn, per whichever
+    enabler is currently active: Snapcaster Mage ("single" -- one
+    Instant/Sorcery, consumes a use), Past in Flames ("all" -- unlimited
+    Instant/Sorcery), or Underworld Breach ("escape" -- any nonland card,
+    but only worth it with 4+ cards in the yard since escape also costs
+    exiling 3 OTHERS)."""
+    if flashback_mode == "single" and flashback_uses_left > 0:
+        return [c for c in graveyard_cards if not c["is_land"] and _is_instant_or_sorcery(c)]
+    if flashback_mode == "all":
+        return [c for c in graveyard_cards if not c["is_land"] and _is_instant_or_sorcery(c)]
+    if flashback_mode == "escape" and len(graveyard_cards) >= 4:
+        return [c for c in graveyard_cards if not c["is_land"]]
+    return []
 
 
 def _compute_copy_multiplier(card, is_attacking, copies_while_attacking, is_commander_cast, battlefield_permanents):
@@ -714,7 +792,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     battlefield_lands = []  # names of lands in play
     battlefield_permanents = []  # names of nonland permanents (creatures/artifacts/etc.) in play
     battlefield_permanent_cards = []  # full card dicts, parallel to battlefield_permanents
+    battlefield_costed_rocks = []  # mana rocks with a per-use activation cost (Signets, etc.)
     graveyard = []  # names of resolved Instants/Sorceries and discarded cards, in order
+    graveyard_cards = []  # full card dicts, parallel to graveyard -- for flashback/escape recasting
     first_cast_turn = {}
     frames = [] if capture_frames else None
     win_turn = None
@@ -747,6 +827,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             land_event = {"name": land["name"], "fetched": fetched_color}
 
         available = list(battlefield_sources)
+        available = _activate_costed_rocks(battlefield_costed_rocks, available)
+        flashback_mode = None  # "single" (Snapcaster) | "all" (Past in Flames) | "escape" (Underworld Breach)
+        flashback_uses_left = 0
         is_attacking = commander_cast_turn is not None and turn > commander_cast_turn
         firebending_source_name = f"{commander_card['name']} (attacking)" if commander_card else "Attack trigger"
         flash_mana = [
@@ -762,6 +845,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             c for c in hand
             if not c["is_land"]
             and (commander_is_out or not any(_matches_hold_tag(c, tag) for tag in hold_tags))
+            # Underworld Breach's escape also costs exiling 3 OTHER
+            # graveyard cards -- not worth casting without enough there.
+            and (c["name"] != "Underworld Breach" or len(graveyard_cards) >= 4)
         ]
         if commander_card is not None and commander_cast_turn is None:
             pool.append(commander_card)
@@ -770,7 +856,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
         while progressed:
             progressed = False
             candidates = sorted(
-                pool,
+                pool + _graveyard_candidates(graveyard_cards, flashback_mode, flashback_uses_left),
                 key=lambda c: (_cast_priority(c, commander_card), -c["cmc"]),
             )
             for card in candidates:
@@ -828,11 +914,24 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         win_x_value = x_value
 
                 is_commander_cast = commander_card is not None and card is commander_card
+                from_graveyard = any(card is g for g in graveyard_cards)
                 if is_commander_cast:
                     commander_cast_turn = turn
+                elif from_graveyard:
+                    # Cast from the graveyard via flashback/escape -- the
+                    # card gets exiled after resolving, not returned to hand
+                    # or the graveyard.
+                    graveyard_cards.remove(card)
+                    graveyard.remove(card["name"])
+                    if flashback_mode == "single":
+                        flashback_uses_left -= 1
+                    elif flashback_mode == "escape":
+                        for _ in range(min(3, len(graveyard_cards))):
+                            exiled = graveyard_cards.pop(0)
+                            graveyard.remove(exiled["name"])
                 else:
                     hand.remove(card)
-                pool.remove(card)
+                    pool.remove(card)
 
                 if card["name"] not in first_cast_turn:
                     first_cast_turn[card["name"]] = turn
@@ -860,14 +959,24 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                             battlefield_permanents.append(card["name"] + " (copy)")
                             battlefield_permanent_cards.append(card)
                             permanents_added += 1
-                else:
+                elif not from_graveyard:
                     graveyard.append(card["name"])  # Instants/Sorceries go to the graveyard once resolved
+                    graveyard_cards.append(card)
 
                 mana_profile = card.get("_mana_profile")
                 if mana_profile:
                     if mana_profile["kind"] == "treasure":
                         treasure_count += mana_profile["amount"] * copy_multiplier
                         treasure_colors = mana_profile["produces"]
+                    elif mana_profile["kind"] == "permanent" and mana_profile.get("activation_cost", 0) > 0:
+                        # Signet-style: costs mana every time it's tapped,
+                        # so it's not a free ongoing source -- pay for it
+                        # right away (same-turn benefit) and again each
+                        # future turn via _activate_costed_rocks.
+                        for _ in range(copy_multiplier):
+                            rock = dict(mana_profile, source_name=card["name"])
+                            battlefield_costed_rocks.append(rock)
+                            available = _activate_costed_rocks([rock], available)
                     else:
                         for _ in range(copy_multiplier):
                             _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])
@@ -880,6 +989,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         pool = [c for c in pool if not any(c is d for d in discarded_cards)]
                         discarded = len(discarded_cards)
                         graveyard.extend(d["name"] for d in discarded_cards)
+                        graveyard_cards.extend(discarded_cards)
                     drew = draw_profile["draw"] * copy_multiplier
                     for _ in range(drew):
                         if library:
@@ -904,6 +1014,17 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                     battlefield_permanents.append(three_steps_target["name"] + " (copy)")
                     battlefield_permanent_cards.append(three_steps_target)
                     permanents_added += 1
+                if card["name"] == "Brotherhood Regalia" and available:
+                    # Equip legendary creature {1} -- assume we always have
+                    # a legendary creature (the commander) to attach it to.
+                    available = available[1:]
+                if card["name"] == "Snapcaster Mage":
+                    flashback_mode = flashback_mode or "single"
+                    flashback_uses_left += copy_multiplier
+                if card["name"] == "Past in Flames":
+                    flashback_mode = "all"
+                if card["name"] == "Underworld Breach":
+                    flashback_mode = "escape"
 
                 if capture_frames:
                     cast_events.append({
@@ -1074,10 +1195,20 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         if win_turn is not None:
             winning_games.append((game_index, win_turn))
 
-    default_game_index = min(winning_games, key=lambda t: t[1])[0] if winning_games else 0
+    winning_games.sort(key=lambda t: t[1])
+    default_game_index = winning_games[0][0] if winning_games else 0
     default_replay = replay_single_game(
         entries, commander_name, default_game_index, max_turns, run_seed, on_the_play, profile
     )
+
+    top_games = []
+    for game_index, win_turn in winning_games[:10]:
+        replay = replay_single_game(entries, commander_name, game_index, max_turns, run_seed, on_the_play, profile)
+        top_games.append({
+            "game_index": game_index,
+            "win_turn": win_turn,
+            "last_frame": replay["frames"][-1],
+        })
 
     stats = []
     for name in tracked_names:
@@ -1122,4 +1253,5 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         "avg_win_turn": avg_win_turn,
         "replay": default_replay["frames"],
         "card_images": card_images,
+        "top_games": top_games,
     }

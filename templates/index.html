@@ -305,6 +305,29 @@
         </div>
       </div>
 
+      {% if result.top_games %}
+        <div class="panel">
+          <h2>Top 10 Fastest Wins</h2>
+          <div class="meta">Games that cast an X spell for 8+, fastest first. Click one to load it into the Game Player below.</div>
+          <div class="table-scroll">
+            <table class="stats" id="top-games-table">
+              <thead>
+                <tr><th>Game #</th><th>Win turn</th><th style="text-align: left;">Winning turn</th></tr>
+              </thead>
+              <tbody>
+                {% for g in result.top_games %}
+                  <tr class="top-game-row" data-game-index="{{ g.game_index }}" style="cursor: pointer;">
+                    <td>{{ g.game_index }}</td>
+                    <td>{{ g.win_turn }}</td>
+                    <td style="text-align: left; white-space: normal;" id="top-game-log-{{ loop.index0 }}"></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {% endif %}
+
       <div class="panel">
         <h2>Game Player</h2>
         <div class="meta">
@@ -647,8 +670,7 @@
         speedMultiplier = parseFloat(e.target.value);
       });
 
-      document.getElementById('player-load-btn').addEventListener('click', async () => {
-        const gameIndex = parseInt(els.gameInput.value, 10) || 0;
+      async function loadGame(gameIndex) {
         const btn = document.getElementById('player-load-btn');
         btn.disabled = true;
         btn.textContent = 'Loading...';
@@ -663,6 +685,7 @@
           const data = await resp.json();
           if (!resp.ok) throw new Error(data.error || 'Failed to load game');
           frames = data.frames;
+          els.gameInput.value = String(data.game_index);
           els.gameIndexLabel.textContent = String(data.game_index);
           showTurn(0, false);
           renderLog();
@@ -672,6 +695,24 @@
           btn.disabled = false;
           btn.textContent = 'Load game';
         }
+      }
+
+      document.getElementById('player-load-btn').addEventListener('click', () => {
+        loadGame(parseInt(els.gameInput.value, 10) || 0);
+      });
+
+      document.querySelectorAll('.top-game-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          loadGame(parseInt(row.dataset.gameIndex, 10));
+          document.getElementById('top-games-table').closest('.panel')
+            .scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+      });
+
+      const topGames = {{ (result.top_games or []) | tojson }};
+      topGames.forEach((g, i) => {
+        const cell = document.getElementById(`top-game-log-${i}`);
+        if (cell) cell.innerHTML = buildTurnLogLine(g.last_frame);
       });
 
       showTurn(0, false);
