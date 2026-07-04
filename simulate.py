@@ -356,18 +356,18 @@ def parse_mana_cost(mana_cost):
 
 
 def try_pay(available_sources, generic, colored_pips):
-    """available_sources: list of frozenset(colors), one per untapped mana
-    source. Greedy matcher (not a true optimal solver): satisfies the most
-    color-constrained pips first, preferring the least-flexible matching
-    source so duals are saved for later pips. Returns the list of source
-    indices that would be spent, or None if it can't be paid."""
+    """available_sources: list of {"name": str, "colors": frozenset(colors)}
+    mana sources. Greedy matcher (not a true optimal solver): satisfies the
+    most color-constrained pips first, preferring the least-flexible
+    matching source so duals are saved for later pips. Returns the list of
+    source indices that would be spent, or None if it can't be paid."""
     indexed = list(enumerate(available_sources))
     used = set()
     for pip in sorted(colored_pips, key=len):
-        candidates = [i for i, colors in indexed if i not in used and colors & pip]
+        candidates = [i for i, src in indexed if i not in used and src["colors"] & pip]
         if not candidates:
             return None
-        best = min(candidates, key=lambda i: len(indexed[i][1]))
+        best = min(candidates, key=lambda i: len(indexed[i][1]["colors"]))
         used.add(best)
     if len(indexed) - len(used) < generic:
         return None
@@ -405,7 +405,7 @@ def _choose_discard(hand, battlefield_sources):
     new colors if there's a spare one, otherwise the priciest spell."""
     lands_in_hand = [c for c in hand if c["is_land"]]
     if lands_in_hand:
-        have = {color for source in battlefield_sources for color in source}
+        have = {color for source in battlefield_sources for color in source["colors"]}
 
         def new_color_count(land):
             profile = land["_mana_profile"]
@@ -444,10 +444,10 @@ MULLIGAN_MAX_LANDS = 5
 MAX_MULLIGAN_ATTEMPTS = 200
 
 
-def _draw_opening_hand(library):
+def _draw_opening_hand(library, rng):
     hand = library[:7]
     for _ in range(MAX_MULLIGAN_ATTEMPTS):
-        random.shuffle(library)
+        rng.shuffle(library)
         hand = library[:7]
         lands = sum(1 for c in hand if c["is_land"])
         if MULLIGAN_MIN_LANDS <= lands <= MULLIGAN_MAX_LANDS:
@@ -458,7 +458,7 @@ def _draw_opening_hand(library):
 def _choose_fetch_color(fetch_colors, current_sources, hand):
     if not fetch_colors:
         return None
-    have = {c for src in current_sources for c in src}
+    have = {c for src in current_sources for c in src["colors"]}
     missing_useful = set()
     for card in hand:
         if card["is_land"]:
@@ -476,7 +476,7 @@ def _choose_fetch_color(fetch_colors, current_sources, hand):
 
 
 def _choose_land_to_play(hand_lands, current_sources):
-    have = {c for src in current_sources for c in src}
+    have = {c for src in current_sources for c in src["colors"]}
 
     def new_color_count(land):
         profile = land["_mana_profile"]
@@ -488,26 +488,32 @@ def _choose_land_to_play(hand_lands, current_sources):
     return max(hand_lands, key=new_color_count)
 
 
-def _apply_mana_source(profile, battlefield_sources, available, hand):
+def _apply_mana_source(profile, battlefield_sources, available, hand, source_name):
     """Adds the mana a just-played/cast source provides to `available`
     (this turn) and, if it's a permanent source, to `battlefield_sources`
-    (every future turn too). Mutates both lists in place."""
+    (every future turn too). Mutates both lists in place. Each source is
+    {"name": source_name, "colors": frozenset(colors)} so later cast steps
+    can report exactly which permanent got tapped. Returns the fetched
+    color for fetch lands (for logging), else None."""
     if profile["is_fetch"]:
         color = _choose_fetch_color(profile["fetch_colors"], battlefield_sources, hand)
         if color is None:
-            return
-        source = frozenset({color})
+            return None
+        source = {"name": source_name, "colors": frozenset({color})}
         battlefield_sources.append(source)
         available.append(source)
-        return
+        return color
 
     if not profile["produces"]:
-        return
-    source = frozenset(profile["produces"])
-    new_sources = [source] * profile["amount"]
+        return None
+    new_sources = [
+        {"name": source_name, "colors": frozenset(profile["produces"])}
+        for _ in range(profile["amount"])
+    ]
     if profile["kind"] == "permanent":
         battlefield_sources.extend(new_sources)
     available.extend(new_sources)
+    return None
 
 
 def _is_instant_or_flash(card):
@@ -550,43 +556,54 @@ def _matches_hold_tag(card, tag):
     return tag_lower in card["type_line"].lower() or tag_lower in card["oracle_text"].lower()
 
 
-def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profile=None):
+WIN_X_THRESHOLD = 8  # casting an X spell for this much or more counts as a "win"
+
+
+def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, profile=None, capture_frames=False):
     """Plays one solitaire game. `deck_cards` is the 99/100-card library
     (each a dict from fetch_card_data, annotated with a precomputed
     '_mana_profile'). `commander_card`, if given, is cast from an
     always-available command zone alongside the hand and given top casting
     priority every turn. `profile` (see DEFAULT_PROFILE) supplies deck-
     specific sequencing rules; falls back to generic defaults if omitted.
-    If the commander has a "Firebending N" ability, we assume it attacks
-    every turn starting the turn after it's cast, adding N red mana usable
-    only on Instant/Flash spells that turn (matching the ability's real
-    "lasts until end of combat" wording). Returns
-    ({card_name: first_turn_cast}, turn_by_turn_log_text)."""
+    `rng` is a random.Random instance -- pass one seeded by game index so any
+    specific game can be deterministically replayed later. If the commander
+    has a "Firebending N" ability, we assume it attacks every turn starting
+    the turn after it's cast, adding N red mana usable only on Instant/Flash
+    spells that turn. Set `capture_frames` to also build a turn-by-turn
+    structured replay (land taps, mana floats, board state) for the web
+    UI's game player -- skipped by default since most games are only used
+    for aggregate stats. Returns (first_cast_turn, frames_or_None, win_turn)
+    where win_turn is the first turn an X spell was cast for
+    WIN_X_THRESHOLD+ (or None if it never happened)."""
     profile = profile or DEFAULT_PROFILE
     hold_tags = profile.get("hold_until_commander_resolves", [])
     copies_while_attacking = profile.get("commander_copies_spells_while_attacking", False)
     reserve_kinds = set(profile.get("reserve_mana_kinds_for_x_spells", []))
 
     library = list(deck_cards)
-    hand, library = _draw_opening_hand(library)
+    hand, library = _draw_opening_hand(library, rng)
 
-    battlefield_sources = []  # list of frozenset(colors), one per permanent mana source
+    battlefield_sources = []  # list of {"name","colors"}, one per permanent mana source
     battlefield_lands = []  # names of lands in play
     battlefield_permanents = []  # names of nonland permanents (creatures/artifacts/etc.) in play
     first_cast_turn = {}
-    log = []
+    frames = [] if capture_frames else None
+    win_turn = None
     commander_cast_turn = None
     firebending_amount = (commander_card or {}).get("_firebending", 0)
     treasure_count = 0  # banked across turns
     treasure_colors = set()
 
     for turn in range(1, max_turns + 1):
-        turn_log = [f"Turn {turn}:"]
+        drew_card = None
+        land_event = None
+        cast_events = []
 
         if not (turn == 1 and on_the_play) and library:
             drawn = library.pop(0)
             hand.append(drawn)
-            turn_log.append(f"  Draw: {drawn['name']}")
+            drew_card = drawn["name"]
 
         hand_lands = [c for c in hand if c["is_land"]]
         if hand_lands:
@@ -594,20 +611,18 @@ def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profi
             hand.remove(land)
             battlefield_lands.append(land["name"])
             mana_profile = land["_mana_profile"]
-            note = ""
+            fetched_color = None
             if mana_profile:
-                before = len(battlefield_sources)
-                _apply_mana_source(mana_profile, battlefield_sources, [], hand)
-                if mana_profile["is_fetch"]:
-                    note = f" (fetched {sorted(battlefield_sources[-1])[0] if len(battlefield_sources) > before else 'nothing'})"
-            turn_log.append(f"  Land: {land['name']}{note}")
-        else:
-            turn_log.append("  Land: (none in hand)")
+                fetched_color = _apply_mana_source(mana_profile, battlefield_sources, [], hand, land["name"])
+            land_event = {"name": land["name"], "fetched": fetched_color}
 
         available = list(battlefield_sources)
         is_attacking = commander_cast_turn is not None and turn > commander_cast_turn
-        flash_mana = [frozenset({"R"})] * firebending_amount if is_attacking else []
-        cast_this_turn = []
+        firebending_source_name = f"{commander_card['name']} (attacking)" if commander_card else "Attack trigger"
+        flash_mana = [
+            {"name": firebending_source_name, "colors": frozenset({"R"})}
+            for _ in range(firebending_amount)
+        ] if is_attacking else []
 
         # Hold whatever this deck's profile says to hold until the
         # commander has resolved (e.g. Instants/Flash worth more once it's
@@ -643,11 +658,15 @@ def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profi
                 if flash_eligible:
                     combined += flash_mana
                 if treasures_spendable:
-                    combined += [frozenset(treasure_colors or {"C"})] * treasure_count
+                    combined += [
+                        {"name": "Treasure", "colors": frozenset(treasure_colors or {"C"})}
+                        for _ in range(treasure_count)
+                    ]
 
                 used = try_pay(combined, generic, pips)
                 if used is None:
                     continue
+                tapped_sources = [combined[i] for i in used]
 
                 n_avail = len(available)
                 n_flash = len(flash_mana) if flash_eligible else 0
@@ -668,6 +687,8 @@ def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profi
                     available = []
                     flash_mana = []
                     treasure_count = 0
+                    if win_turn is None and x_value >= WIN_X_THRESHOLD:
+                        win_turn = turn
 
                 is_commander_cast = commander_card is not None and card is commander_card
                 if is_commander_cast:
@@ -678,19 +699,16 @@ def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profi
 
                 if card["name"] not in first_cast_turn:
                     first_cast_turn[card["name"]] = turn
-                label = card["name"]
-                if is_commander_cast:
-                    label += " (commander)"
-                elif x_value is not None:
-                    label += f" (X={x_value})"
-                cast_this_turn.append(label)
 
                 is_copied = is_attacking and copies_while_attacking and not is_commander_cast
 
+                permanents_added = 0
                 if is_commander_cast or _is_permanent_type(card["type_line"]):
                     battlefield_permanents.append(card["name"])
+                    permanents_added = 1
                     if is_copied:
                         battlefield_permanents.append(card["name"] + " (copy)")
+                        permanents_added = 2
 
                 mana_profile = card.get("_mana_profile")
                 if mana_profile:
@@ -698,40 +716,52 @@ def simulate_game(deck_cards, commander_card, max_turns, on_the_play=True, profi
                         treasure_count += mana_profile["amount"] * (2 if is_copied else 1)
                         treasure_colors = mana_profile["produces"]
                     else:
-                        _apply_mana_source(mana_profile, battlefield_sources, available, hand)
+                        _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])
                         if is_copied:
-                            _apply_mana_source(mana_profile, battlefield_sources, available, hand)  # copied by the attack trigger
+                            _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])  # copied by the attack trigger
 
+                drew = discarded = None
                 draw_profile = card.get("_draw_profile")
                 if draw_profile:
                     if draw_profile["discard"]:
-                        discarded = _discard_cards(hand, draw_profile["discard"], battlefield_sources)
-                        pool = [c for c in pool if not any(c is d for d in discarded)]
+                        discarded_cards = _discard_cards(hand, draw_profile["discard"], battlefield_sources)
+                        pool = [c for c in pool if not any(c is d for d in discarded_cards)]
+                        discarded = len(discarded_cards)
                     copies_to_resolve = 2 if is_copied else 1
-                    for _ in range(draw_profile["draw"] * copies_to_resolve):
+                    drew = draw_profile["draw"] * copies_to_resolve
+                    for _ in range(drew):
                         if library:
                             hand.append(library.pop(0))
-                    if draw_profile["draw"]:
-                        drawn_note = f" [drew {draw_profile['draw'] * copies_to_resolve}"
-                        if draw_profile["discard"]:
-                            drawn_note += f", discarded {draw_profile['discard']}"
-                        drawn_note += " (copied, no extra discard)]" if is_copied else "]"
-                        label += drawn_note
-                        cast_this_turn[-1] = label
+
+                if capture_frames:
+                    cast_events.append({
+                        "name": card["name"],
+                        "is_commander": is_commander_cast,
+                        "is_copied": is_copied,
+                        "x_value": x_value,
+                        "tapped": [{"name": s["name"], "colors": sorted(s["colors"])} for s in tapped_sources],
+                        "permanents_added": permanents_added,
+                        "drew": drew,
+                        "discarded": discarded,
+                    })
 
                 progressed = True
                 break
 
-        turn_log.append(f"  Mana available: {len(battlefield_sources)}")
-        if treasure_count:
-            turn_log.append(f"  Treasures banked: {treasure_count}")
-        turn_log.append(f"  Cast: {', '.join(cast_this_turn) if cast_this_turn else '(nothing)'}")
-        turn_log.append(f"  Lands: {', '.join(battlefield_lands) if battlefield_lands else '(none)'}")
-        turn_log.append(f"  Permanents: {', '.join(battlefield_permanents) if battlefield_permanents else '(none)'}")
-        turn_log.append(f"  Hand: {', '.join(c['name'] for c in hand) if hand else '(empty)'}")
-        log.append("\n".join(turn_log))
+        if capture_frames:
+            frames.append({
+                "turn": turn,
+                "drew_card": drew_card,
+                "land": land_event,
+                "casts": cast_events,
+                "mana_available_end": len(battlefield_sources),
+                "treasures_banked_end": treasure_count,
+                "lands_in_play": list(battlefield_lands),
+                "permanents_in_play": list(battlefield_permanents),
+                "hand_end": [c["name"] for c in hand],
+            })
 
-    return first_cast_turn, "\n".join(log)
+    return first_cast_turn, frames, win_turn
 
 
 def build_library(entries, card_data, deck_colors):
@@ -754,13 +784,21 @@ def build_library(entries, card_data, deck_colors):
     return library, unknown
 
 
-def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=True, profile=None):
-    """Fetches card data, runs `num_games` solitaire games, and aggregates
-    per-card cast-by-turn stats. `profile` (see DEFAULT_PROFILE) supplies
-    deck-specific sequencing rules -- pass find_profile_for_commander(name)
-    to auto-apply a saved one, or omit to use generic defaults. Returns a
-    result dict for the web UI."""
-    profile = profile or find_profile_for_commander(commander_name)
+_deck_cache = {}
+
+
+def _deck_cache_key(entries, commander_name):
+    return (tuple(sorted(entries)), commander_name)
+
+
+def prepare_deck(entries, commander_name):
+    """Fetches Scryfall data and builds the library/commander once per
+    unique (entries, commander_name), caching the result -- so re-simulating
+    a specific game index for the replay viewer doesn't re-hit Scryfall."""
+    key = _deck_cache_key(entries, commander_name)
+    if key in _deck_cache:
+        return _deck_cache[key]
+
     all_names = [name for _, name in entries]
     if commander_name:
         all_names = all_names + [commander_name]
@@ -784,25 +822,72 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         commander_info["_draw_profile"] = resolve_draw_profile(commander_info)
         commander_info["_firebending"] = _parse_firebending(commander_info["oracle_text"])
 
+    bundle = {
+        "card_data": card_data,
+        "deck_colors": deck_colors,
+        "library_template": library_template,
+        "commander_info": commander_info,
+        "unknown": unknown,
+    }
+    _deck_cache[key] = bundle
+    return bundle
+
+
+def replay_single_game(entries, commander_name, game_index, max_turns, on_the_play=True, profile=None):
+    """Deterministically re-simulates one specific game (by index) with full
+    frame capture, for the web UI's game player. Returns
+    {"frames": [...], "win_turn": int_or_None, "game_index": game_index}."""
+    bundle = prepare_deck(entries, commander_name)
+    profile = profile or find_profile_for_commander(commander_name)
+    deck_cards = [dict(c) for c in bundle["library_template"]]
+    commander_card = dict(bundle["commander_info"]) if bundle["commander_info"] else None
+    rng = random.Random(game_index)
+    _, frames, win_turn = simulate_game(
+        deck_cards, commander_card, max_turns, rng, on_the_play, profile, capture_frames=True
+    )
+    return {"frames": frames, "win_turn": win_turn, "game_index": game_index}
+
+
+def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=True, profile=None):
+    """Fetches card data, runs `num_games` solitaire games, and aggregates
+    per-card cast-by-turn stats. `profile` (see DEFAULT_PROFILE) supplies
+    deck-specific sequencing rules -- pass find_profile_for_commander(name)
+    to auto-apply a saved one, or omit to use generic defaults. Each game is
+    seeded by its index so it can be exactly replayed later via
+    replay_single_game(). The fastest game to cast an X spell for
+    WIN_X_THRESHOLD+ is picked as the default one to show in the game player.
+    Returns a result dict for the web UI."""
+    profile = profile or find_profile_for_commander(commander_name)
+    bundle = prepare_deck(entries, commander_name)
+    card_data = bundle["card_data"]
+    deck_colors = bundle["deck_colors"]
+    library_template = bundle["library_template"]
+    commander_info = bundle["commander_info"]
+    unknown = bundle["unknown"]
+
     nonland_names = [c["name"] for c in library_template if not c["is_land"]]
     if commander_info:
         nonland_names.append(commander_info["name"])
     tracked_names = list(dict.fromkeys(nonland_names))
 
     cast_turns = {name: [] for name in tracked_names}
-    sample_log = None
+    winning_games = []  # (game_index, win_turn)
 
     for game_index in range(num_games):
         deck_cards = [dict(c) for c in library_template]
         commander_card = dict(commander_info) if commander_info else None
-        first_cast, log_text = simulate_game(
-            deck_cards, commander_card, max_turns, on_the_play, profile
+        rng = random.Random(game_index)
+        first_cast, _, win_turn = simulate_game(
+            deck_cards, commander_card, max_turns, rng, on_the_play, profile
         )
         for name in tracked_names:
             if name in first_cast:
                 cast_turns[name].append(first_cast[name])
-        if game_index == 0:
-            sample_log = log_text
+        if win_turn is not None:
+            winning_games.append((game_index, win_turn))
+
+    default_game_index = min(winning_games, key=lambda t: t[1])[0] if winning_games else 0
+    default_replay = replay_single_game(entries, commander_name, default_game_index, max_turns, on_the_play, profile)
 
     stats = []
     for name in tracked_names:
@@ -832,6 +917,8 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         "unknown_names": unknown,
         "library_size": len(library_template),
         "stats": stats,
-        "sample_log": sample_log,
         "profile_file": profile.get("file"),
+        "default_game_index": default_game_index,
+        "has_winning_game": bool(winning_games),
+        "replay": default_replay["frames"],
     }
