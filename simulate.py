@@ -294,6 +294,18 @@ _CARD_OVERRIDES = {
         # one" mode we always assume.
         "oracle_text": "Draw two cards, then discard a card.",
     },
+    "Mystic Confluence": {
+        # "Choose three, may repeat" among counter/bounce/draw -- assume
+        # two draws and one bounce (the bounce itself isn't modeled).
+        "oracle_text": "Draw two cards.",
+    },
+    "Fall of the Titans": {
+        # Normal cost is {X}{X}{R} (X counted twice) -- our X-spell handling
+        # assumes a single X, so it'd effectively double the real X. Assume
+        # we always have Surge available (very likely in a spell-dense
+        # deck) and use that single-X cost instead.
+        "mana_cost": "{X}{R}",
+    },
 }
 
 
@@ -706,6 +718,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     first_cast_turn = {}
     frames = [] if capture_frames else None
     win_turn = None
+    win_spell_name = None
+    win_x_value = None
     commander_cast_turn = None
     firebending_amount = (commander_card or {}).get("_firebending", 0)
     treasure_count = 0  # banked across turns
@@ -810,6 +824,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                     treasure_count = 0
                     if win_turn is None and x_value >= WIN_X_THRESHOLD and card["name"] not in WIN_EXCLUDED_CARDS:
                         win_turn = turn
+                        win_spell_name = card["name"]
+                        win_x_value = x_value
 
                 is_commander_cast = commander_card is not None and card is commander_card
                 if is_commander_cast:
@@ -881,6 +897,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 if card["name"] == "Bottle-Cap Blast":
                     treasure_count += rng.randint(2, 4) * copy_multiplier
                     treasure_colors = set(ALL_COLORS)
+                if card["name"] == "The Last Agni Kai":
+                    amount = rng.randint(2, 3) * copy_multiplier
+                    available.extend({"name": card["name"], "colors": frozenset({"R"})} for _ in range(amount))
                 if card["name"] == "Three Steps Ahead" and three_steps_target is not None:
                     battlefield_permanents.append(three_steps_target["name"] + " (copy)")
                     battlefield_permanent_cards.append(three_steps_target)
@@ -913,7 +932,12 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "permanents_in_play": list(battlefield_permanents),
                 "hand_end": [c["name"] for c in hand],
                 "graveyard": list(graveyard),
+                "win_spell": win_spell_name if win_turn == turn else None,
+                "win_x_value": win_x_value if win_turn == turn else None,
             })
+
+        if win_turn is not None:
+            break  # no need to keep playing once the deck has won
 
     return first_cast_turn, frames, win_turn
 

@@ -148,6 +148,18 @@
       font-size: 0.9rem;
       font-weight: 600;
     }
+    pre.game-log {
+      white-space: pre-wrap;
+      font-size: 0.82rem;
+      color: var(--text);
+      background: #0d0f13;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    pre.game-log .win-line { color: var(--good); font-weight: 700; }
 
     #loading-overlay {
       position: fixed;
@@ -313,6 +325,9 @@
           </div>
         </div>
         <div class="player-narration" id="player-narration">&nbsp;</div>
+
+        <h2 style="margin-top: 1.5rem;">Turn log</h2>
+        <pre class="game-log" id="player-log"></pre>
       </div>
 
       <div class="panel">
@@ -385,6 +400,42 @@
 
       function baseCardName(name) {
         return name.replace(/ \(copy\)$/, '').replace(/ \(attacking\)$/, '');
+      }
+
+      function escapeHtml(s) {
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      function buildTurnLogLine(f) {
+        const parts = [`Turn ${f.turn}:`];
+        if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
+        if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
+        if (f.casts.length) {
+          const castDescs = f.casts.map((c) => {
+            let d = c.name;
+            if (c.is_commander) d += ' (commander)';
+            if (c.x_value !== null) d += ` for X=${c.x_value}`;
+            if (c.copy_multiplier > 1) d += ` [copied x${c.copy_multiplier}]`;
+            if (c.drew) d += `, drew ${c.drew}` + (c.discarded ? `, discarded ${c.discarded}` : '');
+            return d;
+          });
+          parts.push(`Cast: ${castDescs.join('; ')}.`);
+        } else {
+          parts.push('Cast: (nothing).');
+        }
+        parts.push(`Mana: ${f.mana_available_end}.`);
+        if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
+        let line = escapeHtml(parts.join(' '));
+        if (f.win_spell) {
+          line = `<span class="win-line">${line} \u{1F3C6} WIN -- cast ${escapeHtml(f.win_spell)} for X=${f.win_x_value}!</span>`;
+        }
+        return line;
+      }
+
+      function renderLog() {
+        document.getElementById('player-log').innerHTML = frames.map(buildTurnLogLine).join('\n');
       }
 
       function chip(name, extraClass) {
@@ -549,6 +600,7 @@
           frames = data.frames;
           els.gameIndexLabel.textContent = String(data.game_index);
           showTurn(0, false);
+          renderLog();
         } catch (err) {
           els.narration.textContent = 'Error: ' + err.message;
         } finally {
@@ -558,6 +610,7 @@
       });
 
       showTurn(0, false);
+      renderLog();
     })();
     {% endif %}
   </script>
