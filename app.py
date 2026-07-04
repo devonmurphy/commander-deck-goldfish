@@ -19,6 +19,7 @@ app = Flask(__name__)
 
 DEFAULT_GAMES = 1000
 DEFAULT_MAX_TURNS = 10
+DEFAULT_DECKLIST = "https://archidekt.com/decks/23371168/azula_always_lies"
 
 
 def _int_field(form, name, default, minimum=1):
@@ -37,7 +38,7 @@ def _int_field(form, name, default, minimum=1):
 @app.route("/", methods=["GET", "POST"])
 def index():
     form_values = {
-        "decklist": "",
+        "decklist": DEFAULT_DECKLIST,
         "commander": "",
         "games": DEFAULT_GAMES,
         "max_turns": DEFAULT_MAX_TURNS,
