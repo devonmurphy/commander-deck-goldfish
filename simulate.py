@@ -773,9 +773,11 @@ def _three_steps_ahead_cost_and_target(battlefield_permanent_cards):
 
 
 WIN_X_THRESHOLD = 8  # casting an X spell for this much or more counts as a "win"
-# X spells that only ever hit creatures, not players -- removal, not a
-# finisher, so a big X on these shouldn't count as "winning" the game.
-WIN_EXCLUDED_CARDS = {"Shellshock", "Street Spasm"}
+# X spells that don't actually deal damage to a player -- removal
+# (Shellshock, Street Spasm only ever hit creatures) or pure utility
+# (Reality Spasm just taps/untaps permanents, no damage at all) -- so a
+# big X on these shouldn't count as "winning" the game.
+WIN_EXCLUDED_CARDS = {"Shellshock", "Street Spasm", "Reality Spasm"}
 
 
 def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, profile=None, capture_frames=False):
