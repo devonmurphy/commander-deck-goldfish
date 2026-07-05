@@ -925,6 +925,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 if has_x:
                     # Dump everything left (lands, attack mana, banked
                     # treasures) into X -- go big since it's the last spell.
+                    if flash_mana:
+                        commander_tapped_for_mana = True
                     x_value = len(available) + len(flash_mana) + treasure_count
                     available = []
                     flash_mana = []
