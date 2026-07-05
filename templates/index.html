@@ -662,14 +662,14 @@
         wrap.appendChild(chip(frame.win_spell, ''));
         const badge = document.createElement('div');
         badge.className = 'mana-badge';
-        badge.textContent = `${frame.mana_produced_this_turn} mana`;
+        badge.textContent = `${frame.win_x_value} mana`;
         wrap.appendChild(badge);
         els.winBanner.appendChild(wrap);
 
         const text = document.createElement('div');
         text.className = 'win-banner-text';
         text.innerHTML = `\u{1F3C6} <strong>${escapeHtml(frame.win_spell)}</strong> cast for X=${frame.win_x_value} `
-          + `won the game on turn ${frame.turn} (${frame.mana_produced_this_turn} mana went into it).`;
+          + `won the game on turn ${frame.turn}.`;
         els.winBanner.appendChild(text);
       }
 
