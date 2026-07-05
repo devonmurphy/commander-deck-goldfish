@@ -845,6 +845,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
         available = _activate_costed_rocks(battlefield_costed_rocks, available)
         flashback_mode = None  # "single" (Snapcaster) | "all" (Past in Flames) | "escape" (Underworld Breach)
         flashback_uses_left = 0
+        commander_tapped_for_mana = False  # Firebending mana used this turn -- show her as tapped too
         is_attacking = commander_cast_turn is not None and turn > commander_cast_turn
         # Named exactly after the commander (not "... (attacking)") so the
         # Game Player's tap highlight lands on her existing permanent chip
@@ -915,6 +916,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
 
                 available = [c for i, c in enumerate(available) if i not in avail_used]
                 if flash_eligible:
+                    if flash_used:
+                        commander_tapped_for_mana = True
                     flash_mana = [c for i, c in enumerate(flash_mana) if i not in flash_used]
                 treasure_count -= treasures_used
 
@@ -1077,7 +1080,10 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "treasures_banked_end": treasure_count,
                 "lands_in_play": list(battlefield_lands),
                 "permanents_in_play": list(battlefield_permanents) + ["Treasure"] * treasure_count,
-                "tapped_at_end": _tapped_source_names(battlefield_sources, available),
+                "tapped_at_end": (
+                    _tapped_source_names(battlefield_sources, available)
+                    + ([commander_card["name"]] if commander_tapped_for_mana and commander_card else [])
+                ),
                 "hand_end": [c["name"] for c in hand],
                 "graveyard": list(graveyard),
                 "win_spell": win_spell_name if win_turn == turn else None,

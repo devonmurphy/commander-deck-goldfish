@@ -648,13 +648,13 @@
         const prevLands = prevFrame ? prevFrame.lands_in_play : [];
         const prevPerms = prevFrame ? prevFrame.permanents_in_play : [];
 
+        // Everything starts this turn's animation untapped -- the untap
+        // step already happened; tapping only shows up as spells get cast.
         renderChips(els.lands, prevLands, 0);
         renderChips(els.perms, prevPerms, 0);
         els.floating.innerHTML = '';
         renderChips(els.hand, prevFrame ? prevFrame.hand_end : [], 0);
         renderChips(els.graveyard, prevFrame ? prevFrame.graveyard : [], 0);
-        if (prevFrame) highlightTapped(els.lands, prevFrame.tapped_at_end);
-        if (prevFrame) highlightTapped(els.perms, prevFrame.tapped_at_end);
         els.narration.innerHTML = '&nbsp;';
 
         const steps = [];
@@ -758,7 +758,7 @@
           frames = data.frames;
           els.gameInput.value = String(data.game_index);
           els.gameIndexLabel.textContent = String(data.game_index);
-          showTurn(0, false);
+          showTurn(frames.length - 1, false);
           renderLog();
         } catch (err) {
           els.narration.textContent = 'Error: ' + err.message;
@@ -786,7 +786,7 @@
         if (cell) cell.innerHTML = buildTurnLogLine(g.last_frame);
       });
 
-      showTurn(0, false);
+      showTurn(frames.length - 1, false);
       renderLog();
     })();
     {% endif %}
