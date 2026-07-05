@@ -102,6 +102,17 @@
     .mana-pips { display: flex; gap: 0.35rem; margin-top: 0.4rem; }
     .mana-pips img { width: 20px; height: 20px; border: none; }
 
+    .stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; }
+    .stat-tile { background: #0d0f13; border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1rem; }
+    .stat-tile .value { font-size: 1.6rem; font-weight: 700; color: var(--text); line-height: 1.1; }
+    .stat-tile .label { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
+
+    .win-turn-chart { display: flex; align-items: flex-end; gap: 6px; height: 130px; margin-top: 0.5rem; }
+    .win-turn-bar-col { display: flex; flex-direction: column; align-items: center; flex: 1; height: 100%; justify-content: flex-end; }
+    .win-turn-bar-count { font-size: 0.7rem; color: var(--text); margin-bottom: 0.2rem; min-height: 1em; }
+    .win-turn-bar { width: 100%; max-width: 28px; background: var(--accent); border-radius: 4px 4px 2px 2px; min-height: 2px; transition: height 0.2s; }
+    .win-turn-bar-label { font-size: 0.7rem; color: var(--muted); margin-top: 0.35rem; }
+
     .table-scroll { overflow-x: auto; }
     table.stats { width: 100%; border-collapse: collapse; font-size: 0.85rem; white-space: nowrap; }
     table.stats th, table.stats td { padding: 0.4rem 0.6rem; text-align: right; border-bottom: 1px solid var(--border); }
@@ -285,14 +296,6 @@
               no custom profile (generic sequencing)
             {% endif %}
           </div>
-          <div class="meta">
-            {% if result.has_winning_game %}
-              Win rate (X spell cast for 8+): <strong>{{ "%.0f"|format(result.win_rate) }}%</strong>
-              &middot; average turn to win: <strong>{{ "%.1f"|format(result.avg_win_turn) }}</strong>
-            {% else %}
-              No game cast an X spell for 8+ in this batch.
-            {% endif %}
-          </div>
           <div class="mana-pips">
             {% if result.deck_colors %}
               {% for c in result.deck_colors %}
@@ -303,6 +306,59 @@
             {% endif %}
           </div>
         </div>
+      </div>
+
+      <div class="panel">
+        <h2>Win Stats</h2>
+        {% if result.has_winning_game %}
+          <div class="stat-tiles">
+            <div class="stat-tile">
+              <div class="value">{{ "%.0f"|format(result.win_rate) }}%</div>
+              <div class="label">Win rate (X spell for 8+)</div>
+            </div>
+            <div class="stat-tile">
+              <div class="value">{{ "%.1f"|format(result.avg_win_turn) }}</div>
+              <div class="label">Avg turn to win</div>
+            </div>
+            <div class="stat-tile">
+              <div class="value">{{ "%.0f"|format(result.median_win_turn) }}</div>
+              <div class="label">Median turn to win</div>
+            </div>
+            <div class="stat-tile">
+              <div class="value">{{ result.fastest_win_turn }}</div>
+              <div class="label">Fastest win</div>
+            </div>
+            <div class="stat-tile">
+              <div class="value">{{ result.slowest_win_turn }}</div>
+              <div class="label">Slowest recorded win</div>
+            </div>
+            {% if result.commander_avg_turn is not none %}
+              <div class="stat-tile">
+                <div class="value">{{ "%.1f"|format(result.commander_avg_turn) }}</div>
+                <div class="label">Commander online (avg turn)</div>
+              </div>
+            {% endif %}
+            <div class="stat-tile">
+              <div class="value">{{ "%.1f"|format(result.avg_cards_cast_per_game) }}</div>
+              <div class="label">Avg cards cast / game</div>
+            </div>
+          </div>
+
+          <div class="meta" style="margin-top: 1.25rem;">Wins by turn</div>
+          <div class="win-turn-chart">
+            {% for count in result.win_turn_distribution %}
+              <div class="win-turn-bar-col">
+                <div class="win-turn-bar-count">{{ count if count else "" }}</div>
+                <div class="win-turn-bar"
+                     style="height: {{ (100 * count / result.win_turn_distribution_max) if result.win_turn_distribution_max else 0 }}%"
+                     title="Turn {{ loop.index }}: {{ count }} win(s)"></div>
+                <div class="win-turn-bar-label">T{{ loop.index }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="meta">No game cast an X spell for 8+ in this batch.</div>
+        {% endif %}
       </div>
 
       {% if result.top_games %}
@@ -431,8 +487,8 @@
     {% if result %}
     (function setUpGamePlayer() {
       const MANA_COLORS = { W: '#f8f6d8', U: '#0e68ab', B: '#3a3a3a', R: '#d3202a', G: '#00733e', C: '#a9a9a9' };
-      const BASE_STEP_DELAY_MS = 1100;
-      const BASE_RESOLVE_DELAY_MS = 550;
+      const BASE_STEP_DELAY_MS = 1800;
+      const BASE_RESOLVE_DELAY_MS = 900;
       let speedMultiplier = 1;
       const stepDelay = () => BASE_STEP_DELAY_MS * speedMultiplier;
       const resolveDelay = () => BASE_RESOLVE_DELAY_MS * speedMultiplier;

@@ -24,6 +24,7 @@ import json
 import os
 import random
 import re
+import statistics
 
 import requests
 
@@ -831,7 +832,10 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
         flashback_mode = None  # "single" (Snapcaster) | "all" (Past in Flames) | "escape" (Underworld Breach)
         flashback_uses_left = 0
         is_attacking = commander_cast_turn is not None and turn > commander_cast_turn
-        firebending_source_name = f"{commander_card['name']} (attacking)" if commander_card else "Attack trigger"
+        # Named exactly after the commander (not "... (attacking)") so the
+        # Game Player's tap highlight lands on her existing permanent chip
+        # instead of a separate untapped-looking entry.
+        firebending_source_name = commander_card["name"] if commander_card else "Attack trigger"
         flash_mana = [
             {"name": firebending_source_name, "colors": frozenset({"R"})}
             for _ in range(firebending_amount)
@@ -1050,7 +1054,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "mana_available_end": len(battlefield_sources),
                 "treasures_banked_end": treasure_count,
                 "lands_in_play": list(battlefield_lands),
-                "permanents_in_play": list(battlefield_permanents),
+                "permanents_in_play": list(battlefield_permanents) + ["Treasure"] * treasure_count,
                 "hand_end": [c["name"] for c in hand],
                 "graveyard": list(graveyard),
                 "win_spell": win_spell_name if win_turn == turn else None,
@@ -1232,6 +1236,13 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
 
     win_turns = [t for _, t in winning_games]
     avg_win_turn = sum(win_turns) / len(win_turns) if win_turns else None
+    median_win_turn = statistics.median(win_turns) if win_turns else None
+    fastest_win_turn = min(win_turns) if win_turns else None
+    slowest_win_turn = max(win_turns) if win_turns else None
+    win_turn_distribution = [win_turns.count(t) for t in range(1, max_turns + 1)]
+
+    commander_stat = next((s for s in stats if s["is_commander"]), None)
+    avg_cards_cast_per_game = sum(len(v) for v in cast_turns.values()) / num_games
 
     card_images = {name: info["image_url"] for name, info in card_data.items() if info.get("image_url")}
     if commander_info and commander_info.get("image_url"):
@@ -1251,6 +1262,14 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         "has_winning_game": bool(winning_games),
         "win_rate": 100.0 * len(winning_games) / num_games,
         "avg_win_turn": avg_win_turn,
+        "median_win_turn": median_win_turn,
+        "fastest_win_turn": fastest_win_turn,
+        "slowest_win_turn": slowest_win_turn,
+        "win_turn_distribution": win_turn_distribution,
+        "win_turn_distribution_max": max(win_turn_distribution) if win_turn_distribution else 0,
+        "commander_avg_turn": commander_stat["avg_turn"] if commander_stat else None,
+        "commander_pct_never": commander_stat["pct_never"] if commander_stat else None,
+        "avg_cards_cast_per_game": avg_cards_cast_per_game,
         "replay": default_replay["frames"],
         "card_images": card_images,
         "top_games": top_games,
