@@ -342,7 +342,7 @@ def _parse_activation_cost(text):
     return sum(int(tok) for tok in _MANA_TOKEN_RE.findall(match.group(1)) if tok.isdigit())
 
 
-def resolve_mana_profile(card_info, deck_colors):
+def resolve_mana_profile(card_info, deck_colors, land_type_lines=None):
     """Figures out what a card (land, mana rock, ritual spell, mana dork --
     anything) contributes to the mana pool. Returns None if it isn't a mana
     source at all. Otherwise:
@@ -353,7 +353,12 @@ def resolve_mana_profile(card_info, deck_colors):
     turn; "ritual" sources (Dark Ritual, Seething Song, ...) only add mana
     for the turn they're cast. `activation_cost` is generic mana that must
     be paid EACH TIME a "permanent" source is tapped (e.g. a Signet's {1}) --
-    0 for lands and cost-free rocks, which just produce for free."""
+    0 for lands and cost-free rocks, which just produce for free. `land_type_lines`
+    (type_lines of every OTHER land in the deck) lets a fetchland that only
+    names one or two basic types (e.g. Bloodstained Mire: "Mountain or Swamp")
+    reach any other color it can actually fetch via a nonbasic dual/shock
+    land sharing one of those types (e.g. Watery Grave has the Swamp type,
+    so it's fetchable too, and brings blue along with it)."""
     text = card_info["oracle_text"]
     if "Firebending" in text:
         return None  # attack-triggered, handled separately in simulate_game
@@ -362,10 +367,22 @@ def resolve_mana_profile(card_info, deck_colors):
     is_land = card_info["is_land"]
     is_instant_or_sorcery = "Instant" in type_line or "Sorcery" in type_line
 
-    is_land_search = "search your library for" in text_lower and "land card" in text_lower
+    # Classic fetchlands (Bloodstained Mire, etc.) name specific basic types
+    # ("a Swamp or Mountain card") instead of saying "land card" -- catch
+    # both phrasings.
+    is_land_search = "search your library for" in text_lower and (
+        "land card" in text_lower
+        or any(basic.lower() in text_lower for basic in BASIC_LAND_BY_COLOR.values())
+    )
     if is_land_search:
         named_colors = {color for color, basic in BASIC_LAND_BY_COLOR.items() if basic in text}
-        fetch_colors = named_colors or (set(deck_colors) or {"C"})
+        target_basics = {basic for color, basic in BASIC_LAND_BY_COLOR.items() if basic in text}
+        fetch_colors = set(named_colors)
+        for other_type_line in land_type_lines or []:
+            other_basics = {basic for basic in BASIC_LAND_BY_COLOR.values() if basic in other_type_line}
+            if other_basics & target_basics:
+                fetch_colors |= {c for c, basic in BASIC_LAND_BY_COLOR.items() if basic in other_basics}
+        fetch_colors = fetch_colors or (set(deck_colors) or {"C"})
         return {"kind": "permanent", "is_fetch": True, "fetch_colors": fetch_colors,
                 "produces": set(), "amount": 1, "activation_cost": 0}
 
@@ -537,8 +554,11 @@ def _activate_costed_rocks(rocks, available):
     """Taps each rock that has a per-use activation cost (e.g. a Signet's
     "{1}, {T}: Add {U}{B}.") if `available` can cover it -- these aren't
     free like a land, so they're not sitting in battlefield_sources; we pay
-    the cost and produce the mana fresh each time. Returns the updated
-    `available` list (does not mutate the input)."""
+    the cost and produce the mana fresh each time. Returns
+    (updated_available, activated_names) -- activated_names lists which
+    rocks actually got tapped this call, since they're invisible to
+    _tapped_source_names otherwise (does not mutate the input)."""
+    activated_names = []
     for rock in rocks:
         cost = rock["activation_cost"]
         if cost <= len(available):
@@ -546,7 +566,8 @@ def _activate_costed_rocks(rocks, available):
                 {"name": rock["source_name"], "colors": frozenset(rock["produces"])}
                 for _ in range(rock["amount"])
             ]
-    return available
+            activated_names.append(rock["source_name"])
+    return available, activated_names
 
 
 def _choose_discard(hand, battlefield_sources):
@@ -686,16 +707,19 @@ PRE_COMBAT_ENGINE_PIECES = {"Veyran, Voice of Duality", "Twinning Staff"}
 
 def _cast_priority(card, commander_card):
     """Lower sorts first: commander > mana sources (rituals/rocks/treasure
-    makers, which increase what's available) > flashback/escape enablers and
-    copy-multiplier engine pieces (Veyran, Twinning Staff -- cast main-phase
-    so graveyard rituals are recastable and the copy trigger is upgraded
-    before we commit to an X spell) > X spells (dump everything into
-    maximizing X, since our no-opponent model doesn't value anything "other
-    spells" do anyway) > everything else (only gets whatever's left, which
-    after an X spell dumps its mana is usually nothing this turn)."""
+    makers, which increase what's available) and land-untap spells (Snap,
+    Frantic Search, Turnabout -- refunding already-tapped lands is just as
+    much a net-mana ritual as adding new mana outright) > flashback/escape
+    enablers and copy-multiplier engine pieces (Veyran, Twinning Staff --
+    cast main-phase so graveyard rituals are recastable and the copy
+    trigger is upgraded before we commit to an X spell) > X spells (dump
+    everything into maximizing X, since our no-opponent model doesn't value
+    anything "other spells" do anyway) > everything else (only gets
+    whatever's left, which after an X spell dumps its mana is usually
+    nothing this turn)."""
     if card is commander_card:
         return 0
-    if card.get("_mana_profile"):
+    if card.get("_mana_profile") or card.get("_untap_lands") or card["name"] == "Turnabout":
         return 1
     if card["name"] in FLASHBACK_ENABLERS or card["name"] in PRE_COMBAT_ENGINE_PIECES:
         return 2
@@ -827,6 +851,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
         drew_card = None
         land_event = None
         cast_events = []
+        activated_rock_names = []
 
         if not (turn == 1 and on_the_play) and library:
             drawn = library.pop(0)
@@ -845,7 +870,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             land_event = {"name": land["name"], "fetched": fetched_color}
 
         available = list(battlefield_sources)
-        available = _activate_costed_rocks(battlefield_costed_rocks, available)
+        available, activated_now = _activate_costed_rocks(battlefield_costed_rocks, available)
+        activated_rock_names.extend(activated_now)
         flashback_mode = None  # "single" (Snapcaster) | "all" (Past in Flames) | "escape" (Underworld Breach)
         flashback_uses_left = 0
         commander_tapped_for_mana = False  # Firebending mana used this turn -- show her as tapped too
@@ -1002,7 +1028,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         for _ in range(copy_multiplier):
                             rock = dict(mana_profile, source_name=card["name"])
                             battlefield_costed_rocks.append(rock)
-                            available = _activate_costed_rocks([rock], available)
+                            available, activated_now = _activate_costed_rocks([rock], available)
+                            activated_rock_names.extend(activated_now)
                     else:
                         for _ in range(copy_multiplier):
                             _apply_mana_source(mana_profile, battlefield_sources, available, hand, card["name"])
@@ -1089,6 +1116,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "tapped_at_end": (
                     _tapped_source_names(battlefield_sources, available)
                     + ([commander_card["name"]] if commander_tapped_for_mana and commander_card else [])
+                    + activated_rock_names
                 ),
                 "hand_end": [c["name"] for c in hand],
                 "graveyard": list(graveyard),
@@ -1107,6 +1135,8 @@ def build_library(entries, card_data, deck_colors):
     copy), skipping any name Scryfall didn't recognize. Every card gets a
     precomputed '_mana_profile' (None if it isn't a mana source). Returns
     (library, unknown_names)."""
+    land_type_lines = [info["type_line"] for info in card_data.values() if info["is_land"]]
+
     library = []
     unknown = []
     for qty, name in entries:
@@ -1116,7 +1146,7 @@ def build_library(entries, card_data, deck_colors):
             continue
         for _ in range(qty):
             card = dict(info)
-            card["_mana_profile"] = resolve_mana_profile(info, deck_colors)
+            card["_mana_profile"] = resolve_mana_profile(info, deck_colors, land_type_lines)
             card["_draw_profile"] = resolve_draw_profile(info)
             card["_untap_lands"] = resolve_untap_lands(info)
             library.append(card)
