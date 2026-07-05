@@ -518,10 +518,12 @@
         return div.innerHTML;
       }
 
-      function buildTurnLogLine(f) {
+      function buildTurnLogLine(f, includePermanents) {
         const parts = [`Turn ${f.turn}:`];
-        const board = f.lands_in_play.concat(f.permanents_in_play);
-        if (board.length) parts.push(`Permanents: ${board.join(', ')}.`);
+        if (includePermanents) {
+          const board = f.lands_in_play.concat(f.permanents_in_play);
+          if (board.length) parts.push(`Permanents: ${board.join(', ')}.`);
+        }
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
         if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
         if (!f.win_spell) {
@@ -549,7 +551,7 @@
       }
 
       function renderLog() {
-        document.getElementById('player-log').innerHTML = frames.map(buildTurnLogLine).join('\n');
+        document.getElementById('player-log').innerHTML = frames.map((f) => buildTurnLogLine(f, false)).join('\n');
       }
 
       function chip(name, extraClass) {
@@ -783,7 +785,7 @@
       const topGames = {{ (result.top_games or []) | tojson }};
       topGames.forEach((g, i) => {
         const cell = document.getElementById(`top-game-log-${i}`);
-        if (cell) cell.innerHTML = buildTurnLogLine(g.last_frame);
+        if (cell) cell.innerHTML = buildTurnLogLine(g.last_frame, true);
       });
 
       showTurn(frames.length - 1, false);
