@@ -1062,6 +1062,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         "permanents_added": permanents_added,
                         "drew": drew,
                         "discarded": discarded,
+                        "graveyard_size": len(graveyard),
                     })
 
                 progressed = True

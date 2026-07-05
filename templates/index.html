@@ -184,6 +184,33 @@
       font-size: 0.9rem;
       font-weight: 600;
     }
+    .win-banner {
+      display: none;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--good);
+      border-radius: 8px;
+      background: rgba(74, 222, 128, 0.1);
+    }
+    .win-card-wrap { position: relative; flex-shrink: 0; }
+    .win-card-wrap .chip.chip-img { width: 90px; height: 126px; }
+    .win-card-wrap .chip { font-size: 0.75rem; }
+    .mana-badge {
+      position: absolute;
+      bottom: -8px;
+      right: -8px;
+      background: var(--good);
+      color: #06210f;
+      font-weight: 800;
+      font-size: 0.75rem;
+      padding: 3px 7px;
+      border-radius: 12px;
+      border: 2px solid #0d0f13;
+      white-space: nowrap;
+    }
+    .win-banner-text { color: var(--good); font-weight: 600; }
     pre.game-log {
       white-space: pre-wrap;
       font-size: 0.82rem;
@@ -409,6 +436,8 @@
 
         <div class="player-turn-label" id="player-turn-label">Turn 1</div>
 
+        <div class="win-banner" id="player-win-banner"></div>
+
         <div class="player-board">
           <div class="player-row">
             <div class="player-row-label">Permanents</div>
@@ -504,6 +533,7 @@
         hand: document.getElementById('player-hand'),
         graveyard: document.getElementById('player-graveyard'),
         narration: document.getElementById('player-narration'),
+        winBanner: document.getElementById('player-win-banner'),
         gameIndexLabel: document.getElementById('player-game-index'),
         gameInput: document.getElementById('player-game-input'),
       };
@@ -523,6 +553,7 @@
         if (includePermanents) {
           const board = f.lands_in_play.concat(f.permanents_in_play);
           if (board.length) parts.push(`Permanents: ${board.join(', ')}.`);
+          if (f.graveyard.length) parts.push(`Graveyard: ${f.graveyard.join(', ')}.`);
         }
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
         if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
@@ -617,6 +648,31 @@
         return escapeHtml(text);
       }
 
+      function renderWinBanner(frame) {
+        if (!frame.win_spell) {
+          els.winBanner.style.display = 'none';
+          els.winBanner.innerHTML = '';
+          return;
+        }
+        els.winBanner.innerHTML = '';
+        els.winBanner.style.display = 'flex';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'win-card-wrap';
+        wrap.appendChild(chip(frame.win_spell, ''));
+        const badge = document.createElement('div');
+        badge.className = 'mana-badge';
+        badge.textContent = `${frame.mana_produced_this_turn} mana`;
+        wrap.appendChild(badge);
+        els.winBanner.appendChild(wrap);
+
+        const text = document.createElement('div');
+        text.className = 'win-banner-text';
+        text.innerHTML = `\u{1F3C6} <strong>${escapeHtml(frame.win_spell)}</strong> cast for X=${frame.win_x_value} `
+          + `won the game on turn ${frame.turn} (${frame.mana_produced_this_turn} mana went into it).`;
+        els.winBanner.appendChild(text);
+      }
+
       function updateNavButtons() {
         document.getElementById('player-prev-btn').disabled = currentTurn <= 0;
         document.getElementById('player-next-btn').disabled = currentTurn >= frames.length - 1;
@@ -644,6 +700,7 @@
           highlightTapped(els.lands, frame.tapped_at_end);
           highlightTapped(els.perms, frame.tapped_at_end);
           els.narration.innerHTML = endOfTurnNarration(frame);
+          renderWinBanner(frame);
           return;
         }
 
@@ -658,6 +715,7 @@
         renderChips(els.hand, prevFrame ? prevFrame.hand_end : [], 0);
         renderChips(els.graveyard, prevFrame ? prevFrame.graveyard : [], 0);
         els.narration.innerHTML = '&nbsp;';
+        els.winBanner.style.display = 'none';
 
         const steps = [];
         if (frame.drew_card) steps.push({ type: 'draw', card: frame.drew_card });
@@ -705,10 +763,9 @@
               // tapped sources stay visually tapped after resolving (mana's spent, not returned)
               highlightTapped(els.lands, c.tapped.map((t) => t.name));
               highlightTapped(els.perms, c.tapped.map((t) => t.name));
-              const wentToGraveyard = (c.permanents_added === 0 && !c.is_commander) ? 1 : 0;
-              const gyIncrement = wentToGraveyard + (c.discarded || 0);
-              if (gyIncrement > 0) {
-                gyShown += gyIncrement;
+              if (c.graveyard_size !== gyShown) {
+                const gyIncrement = Math.max(0, c.graveyard_size - gyShown);
+                gyShown = c.graveyard_size;
                 renderChips(els.graveyard, frame.graveyard.slice(0, gyShown), gyIncrement);
               }
               if (c.drew) {
@@ -725,6 +782,7 @@
             highlightTapped(els.lands, frame.tapped_at_end);
             highlightTapped(els.perms, frame.tapped_at_end);
             els.narration.innerHTML = endOfTurnNarration(frame);
+            renderWinBanner(frame);
           }
 
           if (autoplay && stepIdx < steps.length) {
