@@ -468,6 +468,7 @@
 
       function buildTurnLogLine(f) {
         const parts = [`Turn ${f.turn}:`];
+        if (f.permanents_in_play.length) parts.push(`Permanents: ${f.permanents_in_play.join(', ')}.`);
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
         if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
         if (!f.win_spell) {
