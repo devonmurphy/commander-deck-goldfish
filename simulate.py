@@ -1238,7 +1238,9 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
     avg_win_turn = sum(win_turns) / len(win_turns) if win_turns else None
     median_win_turn = statistics.median(win_turns) if win_turns else None
     fastest_win_turn = min(win_turns) if win_turns else None
-    slowest_win_turn = max(win_turns) if win_turns else None
+    # (no "slowest win" stat -- with the early-exit-on-win + a fixed turn
+    # cap, that number just converges to the cap itself and says nothing
+    # useful; the win-turn distribution below tells the real story.)
     win_turn_distribution = [win_turns.count(t) for t in range(1, max_turns + 1)]
 
     commander_stat = next((s for s in stats if s["is_commander"]), None)
@@ -1264,7 +1266,6 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
         "avg_win_turn": avg_win_turn,
         "median_win_turn": median_win_turn,
         "fastest_win_turn": fastest_win_turn,
-        "slowest_win_turn": slowest_win_turn,
         "win_turn_distribution": win_turn_distribution,
         "win_turn_distribution_max": max(win_turn_distribution) if win_turn_distribution else 0,
         "commander_avg_turn": commander_stat["avg_turn"] if commander_stat else None,

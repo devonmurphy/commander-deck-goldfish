@@ -328,10 +328,6 @@
               <div class="value">{{ result.fastest_win_turn }}</div>
               <div class="label">Fastest win</div>
             </div>
-            <div class="stat-tile">
-              <div class="value">{{ result.slowest_win_turn }}</div>
-              <div class="label">Slowest recorded win</div>
-            </div>
             {% if result.commander_avg_turn is not none %}
               <div class="stat-tile">
                 <div class="value">{{ "%.1f"|format(result.commander_avg_turn) }}</div>
