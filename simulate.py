@@ -502,6 +502,20 @@ def resolve_untap_lands(card_info):
     return _word_to_number(match.group(1)) if match else None
 
 
+def _tapped_source_names(all_sources, available):
+    """Names of sources present in `all_sources` but no longer sitting in
+    `available` -- i.e. tapped for mana at some point this turn. They stay
+    tapped until your next untap step, not just until end of turn."""
+    remaining = list(available)
+    tapped = []
+    for source in all_sources:
+        if source in remaining:
+            remaining.remove(source)
+        else:
+            tapped.append(source["name"])
+    return tapped
+
+
 def _refund_lands(count, battlefield_sources, battlefield_lands, available):
     """Moves up to `count` currently-tapped land sources back into
     `available` (mutated in place). "Tapped" = a land source present in
@@ -1046,15 +1060,24 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 break
 
         if capture_frames:
+            # Everything produced this turn either got spent (on a fixed
+            # cost or dumped into an X) or is sitting unspent at the end --
+            # summing both gives the total mana produced this turn.
+            mana_produced_this_turn = (
+                sum(len(c["tapped"]) + (c["x_value"] or 0) for c in cast_events)
+                + len(available) + len(flash_mana) + treasure_count
+            )
             frames.append({
                 "turn": turn,
                 "drew_card": drew_card,
                 "land": land_event,
                 "casts": cast_events,
                 "mana_available_end": len(battlefield_sources),
+                "mana_produced_this_turn": mana_produced_this_turn,
                 "treasures_banked_end": treasure_count,
                 "lands_in_play": list(battlefield_lands),
                 "permanents_in_play": list(battlefield_permanents) + ["Treasure"] * treasure_count,
+                "tapped_at_end": _tapped_source_names(battlefield_sources, available),
                 "hand_end": [c["name"] for c in hand],
                 "graveyard": list(graveyard),
                 "win_spell": win_spell_name if win_turn == turn else None,

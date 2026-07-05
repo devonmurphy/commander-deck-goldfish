@@ -403,7 +403,7 @@
             <option value="0.25">4x</option>
           </select>
           <button type="button" class="ghost" id="player-prev-btn">&larr; Prev turn</button>
-          <button type="button" class="primary" id="player-play-btn">Play turn &#9654;</button>
+          <button type="button" class="primary" id="player-play-btn">Play game &#9654;</button>
           <button type="button" class="ghost" id="player-next-btn">Next turn &rarr;</button>
         </div>
 
@@ -411,16 +411,12 @@
 
         <div class="player-board">
           <div class="player-row">
-            <div class="player-row-label">Lands</div>
-            <div class="chip-row" id="player-lands"></div>
-          </div>
-          <div class="player-row">
             <div class="player-row-label">Permanents</div>
             <div class="chip-row" id="player-permanents"></div>
           </div>
           <div class="player-row">
-            <div class="player-row-label">Floating mana</div>
-            <div class="chip-row" id="player-floating"></div>
+            <div class="player-row-label">Lands</div>
+            <div class="chip-row" id="player-lands"></div>
           </div>
           <div class="player-row">
             <div class="player-row-label">Hand</div>
@@ -429,6 +425,10 @@
           <div class="player-row">
             <div class="player-row-label">Graveyard</div>
             <div class="chip-row" id="player-graveyard"></div>
+          </div>
+          <div class="player-row">
+            <div class="player-row-label">Floating mana</div>
+            <div class="chip-row" id="player-floating"></div>
           </div>
         </div>
         <div class="player-narration" id="player-narration">&nbsp;</div>
@@ -606,10 +606,13 @@
       }
 
       function endOfTurnNarration(frame) {
-        let text = `End of turn ${frame.turn} -- mana available: ${frame.mana_available_end}`;
+        if (frame.win_spell) {
+          return `<span class="win-line">\u{1F3C6} WIN -- cast ${escapeHtml(frame.win_spell)} for X=${frame.win_x_value}! `
+            + `(${frame.mana_produced_this_turn} mana produced this turn)</span>`;
+        }
+        let text = `End of turn ${frame.turn} -- mana available next turn: ${frame.mana_available_end}`;
         if (frame.treasures_banked_end) text += `, treasures banked: ${frame.treasures_banked_end}`;
-        if (frame.win_spell) text += ` \u{1F3C6} WIN -- cast ${frame.win_spell} for X=${frame.win_x_value}!`;
-        return text;
+        return escapeHtml(text);
       }
 
       function updateNavButtons() {
@@ -617,7 +620,7 @@
         document.getElementById('player-next-btn').disabled = currentTurn >= frames.length - 1;
       }
 
-      function showTurn(turnIndex, autoplay) {
+      function showTurn(turnIndex, autoplay, chain) {
         stopPlayback();
         currentTurn = Math.max(0, Math.min(turnIndex, frames.length - 1));
         const frame = frames[currentTurn];
@@ -634,7 +637,11 @@
           els.floating.innerHTML = '';
           renderChips(els.hand, frame.hand_end, 0);
           renderChips(els.graveyard, frame.graveyard, 0);
-          els.narration.textContent = endOfTurnNarration(frame);
+          // Sources tapped this turn stay tapped -- they don't untap until
+          // your next untap step, not just because the turn ended.
+          highlightTapped(els.lands, frame.tapped_at_end);
+          highlightTapped(els.perms, frame.tapped_at_end);
+          els.narration.innerHTML = endOfTurnNarration(frame);
           return;
         }
 
@@ -646,6 +653,8 @@
         els.floating.innerHTML = '';
         renderChips(els.hand, prevFrame ? prevFrame.hand_end : [], 0);
         renderChips(els.graveyard, prevFrame ? prevFrame.graveyard : [], 0);
+        if (prevFrame) highlightTapped(els.lands, prevFrame.tapped_at_end);
+        if (prevFrame) highlightTapped(els.perms, prevFrame.tapped_at_end);
         els.narration.innerHTML = '&nbsp;';
 
         const steps = [];
@@ -668,6 +677,7 @@
             els.narration.textContent = `Draw: ${step.card}`;
           } else if (step.type === 'land') {
             landsShown++;
+            clearTapped(els.lands);
             renderChips(els.lands, frame.lands_in_play.slice(0, landsShown), 1);
             els.narration.textContent = `Land: ${step.land.name}` + (step.land.fetched ? ` (fetched ${step.land.fetched})` : '');
           } else if (step.type === 'cast') {
@@ -688,10 +698,11 @@
 
             resolveTimer = setTimeout(() => {
               els.floating.innerHTML = '';
-              clearTapped(els.lands);
-              clearTapped(els.perms);
               permsShown += c.permanents_added;
               renderChips(els.perms, frame.permanents_in_play.slice(0, permsShown), c.permanents_added);
+              // tapped sources stay visually tapped after resolving (mana's spent, not returned)
+              highlightTapped(els.lands, c.tapped.map((t) => t.name));
+              highlightTapped(els.perms, c.tapped.map((t) => t.name));
               const wentToGraveyard = (c.permanents_added === 0 && !c.is_commander) ? 1 : 0;
               const gyIncrement = wentToGraveyard + (c.discarded || 0);
               if (gyIncrement > 0) {
@@ -709,19 +720,23 @@
             renderChips(els.perms, frame.permanents_in_play, 0);
             renderChips(els.hand, frame.hand_end, 0);
             renderChips(els.graveyard, frame.graveyard, 0);
-            els.narration.textContent = endOfTurnNarration(frame);
+            highlightTapped(els.lands, frame.tapped_at_end);
+            highlightTapped(els.perms, frame.tapped_at_end);
+            els.narration.innerHTML = endOfTurnNarration(frame);
           }
 
           if (autoplay && stepIdx < steps.length) {
             stepTimer = setTimeout(runStep, stepDelay());
+          } else if (autoplay && chain && !frame.win_spell && currentTurn < frames.length - 1) {
+            stepTimer = setTimeout(() => showTurn(currentTurn + 1, true, true), stepDelay());
           }
         }
         runStep();
       }
 
-      document.getElementById('player-prev-btn').addEventListener('click', () => showTurn(currentTurn - 1, true));
-      document.getElementById('player-next-btn').addEventListener('click', () => showTurn(currentTurn + 1, true));
-      document.getElementById('player-play-btn').addEventListener('click', () => showTurn(currentTurn, true));
+      document.getElementById('player-prev-btn').addEventListener('click', () => showTurn(currentTurn - 1, true, false));
+      document.getElementById('player-next-btn').addEventListener('click', () => showTurn(currentTurn + 1, true, false));
+      document.getElementById('player-play-btn').addEventListener('click', () => showTurn(currentTurn, true, true));
       document.getElementById('player-speed').addEventListener('change', (e) => {
         speedMultiplier = parseFloat(e.target.value);
       });
