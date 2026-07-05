@@ -101,6 +101,7 @@ BASIC_LAND_BY_COLOR = {
     "G": "Forest",
 }
 ALL_COLORS = ["W", "U", "B", "R", "G"]
+TREASURE_TOKEN_IMAGE_URL = "https://cards.scryfall.io/normal/front/c/6/c6e096bb-ad9e-4a8b-8b42-26852fa32c1d.jpg"
 
 ARCHIDEKT_URL_RE = re.compile(r"archidekt\.com/decks/(\d+)", re.I)
 _MANA_TOKEN_RE = re.compile(r"\{([^}]+)\}")
@@ -1282,6 +1283,7 @@ def run_simulation(entries, commander_name, num_games, max_turns, on_the_play=Tr
     card_images = {name: info["image_url"] for name, info in card_data.items() if info.get("image_url")}
     if commander_info and commander_info.get("image_url"):
         card_images[commander_info["name"]] = commander_info["image_url"]
+    card_images["Treasure"] = TREASURE_TOKEN_IMAGE_URL
 
     return {
         "num_games": num_games,
