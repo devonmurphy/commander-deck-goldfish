@@ -71,6 +71,30 @@ Crusade) -- tokens are evaluated at their base printed power/toughness for
 any "draw when a small creature enters" triggers (`ETB_DRAW_TRIGGERS`).
 This is a deliberate simplification, not a gap to fix per-profile.
 
+- `win_creature_count_threshold`: for decks that win by amassing N
+  creatures via a land-sacrifice/recursion engine (e.g. Titania, Protector
+  of Argoth: "make 8 dudes") rather than combat or a big X spell. Setting
+  this turns on a whole extra land-lifecycle subsystem in `simulate.py`
+  that's otherwise a complete no-op for every other profile: multiple land
+  drops per turn (auto-detected "play N additional lands" abilities, e.g.
+  Azusa), fetch/ETB-search lands actually leaving play into a land
+  graveyard instead of just adding a mana source forever, "you may play
+  lands from your graveyard" recursion (auto-detected, e.g. Ramunap
+  Excavator/Crucible of Worlds), and land-sac-token triggers (auto-detected
+  from oracle text via `_parse_land_sacrificed_token_trigger`, e.g. Titania
+  herself and Baloth Prime -- each independently doubled by token doublers,
+  same `_TOKEN_DOUBLER_RE` used for tribal-token wins). A handful of
+  "sacrifice a land, search N basics" ramp spells (Harrow, Scapeshift,
+  etc.) are also recognized via a small name-keyed table
+  (`SAC_LANDS_RAMP_SPELLS`) since their exact shape varies too much for one
+  regex. Deliberately NOT modeled (documented simplification, not a gap):
+  one-off activated-ability sac-lands (Strip Mine, Ghost Quarter, ...),
+  ETB-sacrifice-as-replacement-cost lands (Lotus Vale, Glacial Chasm), and
+  Life from the Loam/Dredge-style hand recursion. See
+  `profiles/titania_protector_of_argoth.json` -- this field is usually the
+  *only* one such a profile needs, since the mechanics themselves are
+  auto-detected from oracle text rather than needing a curated card list.
+
 Note what's already generic and does NOT need a profile entry: "Firebending
 N" is auto-detected from oracle text (see `_parse_firebending`); regular
 mana rocks, rituals, Treasure-token math, and "draw N (discard M)" card-draw

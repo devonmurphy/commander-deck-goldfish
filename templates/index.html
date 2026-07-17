@@ -556,7 +556,12 @@
           if (f.graveyard.length) parts.push(`Graveyard: ${f.graveyard.join(', ')}.`);
         }
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
-        if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
+        f.lands.forEach((land) => {
+          parts.push(
+            `Land ${land.name}` + (land.from_graveyard ? ' (from graveyard)' : '')
+              + (land.fetched ? ` (fetched ${land.fetched})` : '') + '.'
+          );
+        });
         if (!f.win_label) {
           parts.push(`Mana: ${f.mana_available_end}.`);
           if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
@@ -721,7 +726,7 @@
 
         const steps = [];
         if (frame.drew_card) steps.push({ type: 'draw', card: frame.drew_card });
-        if (frame.land) steps.push({ type: 'land', land: frame.land });
+        frame.lands.forEach((land) => steps.push({ type: 'land', land }));
         frame.casts.forEach((c) => steps.push({ type: 'cast', cast: c }));
         steps.push({ type: 'end' });
 
@@ -741,7 +746,9 @@
             landsShown++;
             clearTapped(els.lands);
             renderChips(els.lands, frame.lands_in_play.slice(0, landsShown), 1);
-            els.narration.textContent = `Land: ${step.land.name}` + (step.land.fetched ? ` (fetched ${step.land.fetched})` : '');
+            els.narration.textContent = `Land: ${step.land.name}`
+              + (step.land.from_graveyard ? ' (from graveyard)' : '')
+              + (step.land.fetched ? ` (fetched ${step.land.fetched})` : '');
           } else if (step.type === 'cast') {
             const c = step.cast;
             clearTapped(els.lands);

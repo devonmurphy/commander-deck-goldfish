@@ -63,6 +63,14 @@ PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile
 #   roaming_throne_chosen_type: if the deck runs Roaming Throne, the creature
 #     type assumed chosen -- when it matches win_tribal_token_type, doubles
 #     the tribal combat-damage trigger.
+#   win_creature_count_threshold: for decks that win by amassing N creatures
+#     via a land-sacrifice/recursion engine (e.g. Titania, Protector of
+#     Argoth: "make 8 dudes") rather than combat or a big X spell. Setting
+#     this turns on a whole extra land-lifecycle subsystem (multiple land
+#     drops per turn, fetch/sac-lands actually leaving play into a land
+#     graveyard, "play lands from your graveyard" recursion, land-sac token
+#     triggers) that's otherwise a complete no-op -- every other
+#     profile/deck plays exactly one land per turn from hand as before.
 DEFAULT_PROFILE = {
     "commander": None,
     "hold_until_commander_resolves": [],
@@ -75,6 +83,7 @@ DEFAULT_PROFILE = {
     "double_strike_blanket_cards": [],
     "double_strike_propagator_cards": [],
     "roaming_throne_chosen_type": None,
+    "win_creature_count_threshold": None,
 }
 
 
@@ -762,7 +771,10 @@ def _cast_priority(card, commander_card):
     nothing this turn)."""
     if card is commander_card:
         return 0
-    if card.get("_mana_profile") or card.get("_untap_lands") or card["name"] == "Turnabout":
+    if (
+        card.get("_mana_profile") or card.get("_untap_lands") or card["name"] == "Turnabout"
+        or card["name"] in SAC_LANDS_RAMP_SPELLS
+    ):
         return 1
     if card["name"] in FLASHBACK_ENABLERS or card["name"] in PRE_COMBAT_ENGINE_PIECES:
         return 2
@@ -837,6 +849,165 @@ ETB_DRAW_TRIGGERS = {
     "Symmetry Matrix": {"condition": "power_eq_toughness", "cost": 1, "once_per_turn": False},
     "Tocasia's Welcome": {"condition": "mv_le_3", "cost": 0, "once_per_turn": True},
 }
+
+
+# ---------------------------------------------------------------------------
+# Land-sacrifice/recursion engine (Titania, Protector of Argoth-style decks)
+# -- entirely opt-in via a profile's win_creature_count_threshold. Every
+# other deck still plays exactly one land per turn from hand, as before.
+# ---------------------------------------------------------------------------
+
+_LAND_SAC_TOKEN_RE = re.compile(
+    r"whenever (?:a land you control is put into a graveyard from the battlefield|you sacrifice a land), "
+    r"create (?:a|an|one|two|three|\d+) (?:tapped )?(\d+)/(\d+) \w+ (\w+) creature token",
+    re.I,
+)
+
+
+def _parse_land_sacrificed_token_trigger(oracle_text):
+    """Titania ('whenever a land you control is put into a graveyard from
+    the battlefield, create a 5/3 green Elemental creature token') and
+    Baloth Prime ('whenever you sacrifice a land, create a tapped 4/4 green
+    Beast creature token...') style triggers -- returns
+    {"power": 5, "toughness": 3, "type": "Elemental"} or None."""
+    match = _LAND_SAC_TOKEN_RE.search(oracle_text)
+    if not match:
+        return None
+    return {"power": int(match.group(1)), "toughness": int(match.group(2)), "type": match.group(3)}
+
+
+_PLAY_LANDS_FROM_GRAVEYARD_RE = re.compile(r"you may play lands? from your graveyard", re.I)
+
+_EXTRA_LAND_DROPS_RE = re.compile(
+    r"play (a|an|one|two|three|\d+) additional lands? on each of your turns", re.I
+)
+
+
+def _parse_extra_land_drops(oracle_text):
+    """Azusa ('play two additional lands') / Icetill Explorer ('play an
+    additional land') style abilities -- returns the extra count, or 0."""
+    match = _EXTRA_LAND_DROPS_RE.search(oracle_text)
+    return _word_to_number(match.group(1).lower()) if match else 0
+
+
+# Name-keyed (mirrors ETB_DRAW_TRIGGERS's precedent) since the "sacrifice N
+# lands, search M basics" shape varies too much per-card for one clean
+# regex. (lands_sacrificed, basics_fetched) -- "all" means "as many as you
+# currently control." Entish Restoration's "3 instead of 2 with a power-4+
+# creature" is a runtime check (see _run_sac_lands_ramp_spell); Crop
+# Rotation's "any land card" is approximated as a basic, same simplification
+# as everywhere else in this file; "enters tapped" is ignored, consistent
+# with the file's existing "lands always enter untapped" simplification.
+SAC_LANDS_RAMP_SPELLS = {
+    "Harrow": (1, 2),
+    "Crop Rotation": (1, 1),
+    "Entish Restoration": (1, 2),
+    "Roiling Regrowth": (1, 2),
+    "Cycle of Renewal": (1, 2),
+    "Planar Engineering": (2, 4),
+    "Scapeshift": ("all", "all"),
+}
+
+
+def _make_token_card(type_name, power, toughness):
+    """Synthetic card dict for a land-sac-triggered token (Titania's 5/3
+    Elemental, Baloth Prime's 4/4 Beast, ...) -- shaped like a real card
+    dict so it works everywhere one is expected (battlefield_permanent_cards,
+    frame capture, ETB-trigger/power checks)."""
+    return {
+        "name": type_name,
+        "type_line": f"Creature Token — {type_name}",
+        "is_land": False,
+        "mana_cost": "",
+        "cmc": 0,
+        "oracle_text": "",
+        "color_identity": [],
+        "produced_mana": None,
+        "image_url": None,
+        "power": power,
+        "toughness": toughness,
+        "_mana_profile": None,
+        "_draw_profile": None,
+        "_untap_lands": None,
+    }
+
+
+def _sacrifice_land(land_card, battlefield_lands, graveyard_lands, battlefield_permanents,
+                     battlefield_permanent_cards, battlefield_creatures, turn):
+    """A land the engine controls is put into the graveyard from the
+    battlefield (a fetch/ETB-search land resolving, or an additional cost
+    on a ramp spell). Removes it from battlefield_lands, banks it in
+    graveyard_lands for recursion (Ramunap Excavator/Crucible of
+    Worlds/...), and fires every land-sac token trigger found on ANY
+    battlefield permanent (not just the commander -- Baloth Prime needs
+    this too), each doubled by token-doubler permanents in play (same
+    _TOKEN_DOUBLER_RE used for Zeriam's tribal tokens). Mutates
+    battlefield_lands/graveyard_lands/battlefield_permanents/
+    battlefield_permanent_cards/battlefield_creatures in place."""
+    if land_card["name"] in battlefield_lands:
+        battlefield_lands.remove(land_card["name"])
+    graveyard_lands.append(land_card)
+
+    num_doublers = sum(1 for c in battlefield_permanent_cards if _TOKEN_DOUBLER_RE.search(c["oracle_text"]))
+    doubler_multiplier = 2 ** num_doublers
+    for source_card in list(battlefield_permanent_cards):
+        trigger = _parse_land_sacrificed_token_trigger(source_card["oracle_text"])
+        if not trigger:
+            continue
+        token_card = _make_token_card(trigger["type"], trigger["power"], trigger["toughness"])
+        for _ in range(doubler_multiplier):
+            battlefield_permanents.append(trigger["type"])
+            battlefield_permanent_cards.append(token_card)
+            battlefield_creatures.append(
+                {"name": trigger["type"], "card": token_card, "entered_turn": turn, "has_double_strike": False}
+            )
+
+
+def _search_basic_lands(library, count, battlefield_sources):
+    """Pulls up to `count` basic land cards out of `library` (mutated in
+    place, same as a real search), preferring colors not yet covered by
+    battlefield_sources. Filtering against `library` -- rather than a
+    separate "deck colors" concept -- naturally never picks a color the
+    deck doesn't run, since a card of that color simply won't be in the
+    library to find. Returns the cards found (fewer than `count` if the
+    library's run dry on basics)."""
+    found = []
+    for _ in range(count):
+        basics = [c for c in library if c["name"] in BASIC_LAND_BY_COLOR.values()]
+        if not basics:
+            break
+        have = {clr for src in battlefield_sources for clr in src["colors"]}
+        have |= {
+            clr for f in found for clr, name in BASIC_LAND_BY_COLOR.items() if name == f["name"]
+        }
+        preferred = [
+            c for c in basics
+            if next((clr for clr, name in BASIC_LAND_BY_COLOR.items() if name == c["name"]), None) not in have
+        ]
+        pick = preferred[0] if preferred else basics[0]
+        library.remove(pick)
+        found.append(pick)
+    return found
+
+
+def _least_valuable_land_to_sacrifice(battlefield_lands, battlefield_sources):
+    """Picks a land name to sacrifice as an additional cost (Harrow-style
+    ramp spells): the one contributing the fewest colors not already
+    covered by the rest of the board, mirroring _choose_discard's
+    'least useful' heuristic. Returns a name, or None if there are no
+    lands in play."""
+    if not battlefield_lands:
+        return None
+    all_colors = {}
+    for name in battlefield_lands:
+        source = next((s for s in battlefield_sources if s["name"] == name), None)
+        all_colors[name] = source["colors"] if source else frozenset()
+
+    def unique_color_count(name):
+        others = set().union(*(c for n, c in all_colors.items() if n != name)) if len(all_colors) > 1 else set()
+        return len(all_colors[name] - others)
+
+    return min(battlefield_lands, key=unique_color_count)
 
 
 def _matches_hold_tag(card, tag):
@@ -1124,9 +1295,17 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     )
     tribal_token_count = 0  # cumulative tokens of win_tribal_type created via combat
 
+    # Land-sacrifice/recursion win condition (see DEFAULT_PROFILE) -- a
+    # complete no-op for decks whose profile doesn't set
+    # win_creature_count_threshold; every other deck still plays exactly
+    # one land per turn from hand, as before.
+    graveyard_lands = []  # land card dicts sacrificed and eligible for recursion
+    battlefield_land_cards = {}  # land name -> card dict, for sac-to-ramp spells to look up what they're sacrificing
+    win_creature_threshold = profile.get("win_creature_count_threshold")
+
     for turn in range(1, max_turns + 1):
         drew_card = None
-        land_event = None
+        land_events = []
         cast_events = []
         activated_rock_names = []
         cast_this_turn_names = set()
@@ -1138,16 +1317,65 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             hand.append(drawn)
             drew_card = drawn["name"]
 
-        hand_lands = [c for c in hand if c["is_land"]]
-        if hand_lands:
-            land = _choose_land_to_play(hand_lands, battlefield_sources)
-            hand.remove(land)
-            battlefield_lands.append(land["name"])
-            mana_profile = land["_mana_profile"]
-            fetched_color = None
-            if mana_profile:
-                fetched_color = _apply_mana_source(mana_profile, battlefield_sources, [], hand, land["name"])
-            land_event = {"name": land["name"], "fetched": fetched_color}
+        if win_creature_threshold:
+            # Multiple land drops per turn (Azusa/Icetill Explorer),
+            # replaying fetch/search lands out of graveyard_lands (Ramunap
+            # Excavator/Crucible of Worlds/Conduit of Worlds/...) -- see
+            # DEFAULT_PROFILE.
+            max_land_drops = 1 + sum(
+                _parse_extra_land_drops(c["oracle_text"]) for c in battlefield_permanent_cards
+            )
+            can_recur_lands = any(
+                _PLAY_LANDS_FROM_GRAVEYARD_RE.search(c["oracle_text"]) for c in battlefield_permanent_cards
+            )
+            for _ in range(max_land_drops):
+                hand_lands = [c for c in hand if c["is_land"]]
+                candidates = hand_lands + (graveyard_lands if can_recur_lands else [])
+                if not candidates:
+                    break
+                # Always crack whatever's crackable first -- that's the
+                # deck's actual optimal line (more Titania/Baloth Prime
+                # triggers), falling back to the normal color-fixing pick.
+                fetch_candidates = [
+                    c for c in candidates if c["_mana_profile"] and c["_mana_profile"]["is_fetch"]
+                ]
+                land = _choose_land_to_play(fetch_candidates or candidates, battlefield_sources)
+                from_graveyard = any(land is g for g in graveyard_lands)
+                if from_graveyard:
+                    graveyard_lands.remove(land)
+                else:
+                    hand.remove(land)
+                battlefield_lands.append(land["name"])
+                battlefield_land_cards[land["name"]] = land
+                mana_profile = land["_mana_profile"]
+                fetched_color = None
+                if mana_profile:
+                    fetched_color = _apply_mana_source(mana_profile, battlefield_sources, [], hand, land["name"])
+                    if mana_profile["is_fetch"]:
+                        if fetched_color:
+                            # _apply_mana_source names the found mana source
+                            # after the fetchland itself (see its "source" dict)
+                            # -- match that here so battlefield_lands and
+                            # battlefield_sources agree on what's actually in
+                            # play (needed for tapped-chip highlighting and
+                            # _least_valuable_land_to_sacrifice's lookups).
+                            battlefield_lands.append(land["name"])
+                        _sacrifice_land(
+                            land, battlefield_lands, graveyard_lands, battlefield_permanents,
+                            battlefield_permanent_cards, battlefield_creatures, turn
+                        )
+                land_events.append({"name": land["name"], "fetched": fetched_color, "from_graveyard": from_graveyard})
+        else:
+            hand_lands = [c for c in hand if c["is_land"]]
+            if hand_lands:
+                land = _choose_land_to_play(hand_lands, battlefield_sources)
+                hand.remove(land)
+                battlefield_lands.append(land["name"])
+                mana_profile = land["_mana_profile"]
+                fetched_color = None
+                if mana_profile:
+                    fetched_color = _apply_mana_source(mana_profile, battlefield_sources, [], hand, land["name"])
+                land_events.append({"name": land["name"], "fetched": fetched_color, "from_graveyard": False})
 
         available = list(battlefield_sources)
         available, activated_now = _activate_costed_rocks(battlefield_costed_rocks, available)
@@ -1176,6 +1404,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             # Underworld Breach's escape also costs exiling 3 OTHER
             # graveyard cards -- not worth casting without enough there.
             and (c["name"] != "Underworld Breach" or len(graveyard_cards) >= 4)
+            # Harrow-style ramp spells require a land to sacrifice as an
+            # additional cost -- nothing to sac, nothing to cast.
+            and (c["name"] not in SAC_LANDS_RAMP_SPELLS or battlefield_lands)
         ]
         if commander_card is not None and commander_cast_turn is None:
             pool.append(commander_card)
@@ -1371,6 +1602,32 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                     # Equip legendary creature {1} -- assume we always have
                     # a legendary creature (the commander) to attach it to.
                     available = available[1:]
+                ramp_spec = SAC_LANDS_RAMP_SPELLS.get(card["name"])
+                if ramp_spec and win_creature_threshold:
+                    sac_count, fetch_count = ramp_spec
+                    if sac_count == "all":
+                        sac_count = fetch_count = len(battlefield_lands)
+                    if card["name"] == "Entish Restoration" and any(
+                        (c["card"].get("power") or 0) >= 4 for c in battlefield_creatures
+                    ):
+                        fetch_count = 3
+                    for _ in range(min(sac_count, len(battlefield_lands)) * copy_multiplier):
+                        sac_name = _least_valuable_land_to_sacrifice(battlefield_lands, battlefield_sources)
+                        if sac_name is None:
+                            break
+                        sac_card = battlefield_land_cards.get(sac_name)
+                        if sac_card is not None:
+                            _sacrifice_land(
+                                sac_card, battlefield_lands, graveyard_lands, battlefield_permanents,
+                                battlefield_permanent_cards, battlefield_creatures, turn
+                            )
+                    new_basics = _search_basic_lands(library, fetch_count * copy_multiplier, battlefield_sources)
+                    for basic in new_basics:
+                        battlefield_lands.append(basic["name"])
+                        battlefield_land_cards[basic["name"]] = basic
+                        basic_profile = basic["_mana_profile"]
+                        if basic_profile:
+                            _apply_mana_source(basic_profile, battlefield_sources, available, hand, basic["name"])
                 if card["name"] == "Snapcaster Mage":
                     flashback_mode = flashback_mode or "single"
                     flashback_uses_left += copy_multiplier
@@ -1406,6 +1663,10 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 win_turn = turn
                 win_label = f"made the {win_tribal_threshold}th {win_tribal_type}!"
 
+        if win_turn is None and win_creature_threshold is not None and len(battlefield_creatures) >= win_creature_threshold:
+            win_turn = turn
+            win_label = f"controls {win_creature_threshold} creatures!"
+
         if capture_frames:
             # Everything produced this turn either got spent (on a fixed
             # cost or dumped into an X) or is sitting unspent at the end --
@@ -1417,7 +1678,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
             frames.append({
                 "turn": turn,
                 "drew_card": drew_card,
-                "land": land_event,
+                "lands": land_events,
                 "casts": cast_events,
                 "mana_available_end": len(battlefield_sources),
                 "mana_produced_this_turn": mana_produced_this_turn,
