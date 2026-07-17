@@ -95,6 +95,30 @@ This is a deliberate simplification, not a gap to fix per-profile.
   *only* one such a profile needs, since the mechanics themselves are
   auto-detected from oracle text rather than needing a curated card list.
 
+- `win_creature_min_cmc`: optional filter on `win_creature_count_threshold`
+  -- when set, only creatures with mana value >= this count toward the
+  threshold. Use this when a deck's "win by controlling N creatures" plan
+  specifically means big/expensive payoffs, not any cheap utility
+  creatures the deck also happens to run (e.g. Esika // The Prismatic
+  Bridge's "5+ big boiz": the deck's own copy-trigger engine pieces are
+  cheap CMC 2-3 creatures that shouldn't count toward the 5 -- only the
+  CMC 5+ bombs the Bridge actually cheats into play). `None` (the default)
+  means every creature counts. See
+  `profiles/esika_god_of_the_tree_the_prismatic_bridge.json`.
+
+## MDFC commanders: casting only one face
+
+Some commanders are modal double-faced cards (MDFCs) where the deck's
+whole plan revolves around one specific face (e.g. Esika, God of the Tree
+// The Prismatic Bridge -- always cast and played as The Prismatic Bridge,
+never as Esika). `simulate.py` has no separate "which face" concept; the
+fix is a `_CARD_OVERRIDES` entry (see that dict, keyed by the full combined
+name exactly as Archidekt/Scryfall report it) that rewrites `type_line`/
+`mana_cost`/`cmc`/`oracle_text`/`power`/`toughness` to just the intended
+face's values. This is the same mechanism already used for exotic layouts
+like Blazing Firesinger // Seething Song -- no new engine code needed, just
+data. `_apply_card_overrides` re-derives `is_land` afterward automatically.
+
 Note what's already generic and does NOT need a profile entry: "Firebending
 N" is auto-detected from oracle text (see `_parse_firebending`); regular
 mana rocks, rituals, Treasure-token math, and "draw N (discard M)" card-draw

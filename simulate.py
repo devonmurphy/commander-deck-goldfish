@@ -71,6 +71,13 @@ PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile
 #     graveyard, "play lands from your graveyard" recursion, land-sac token
 #     triggers) that's otherwise a complete no-op -- every other
 #     profile/deck plays exactly one land per turn from hand as before.
+#   win_creature_min_cmc: optional filter on win_creature_count_threshold --
+#     when set, only creatures with mana value >= this count toward the
+#     threshold (e.g. Esika // The Prismatic Bridge's "5+ big boiz": the
+#     deck's own cheap copy-trigger utility creatures shouldn't count, only
+#     the big uncastable bombs the Bridge actually puts into play). None
+#     (the default) means every creature counts, same as before this field
+#     existed.
 DEFAULT_PROFILE = {
     "commander": None,
     "hold_until_commander_resolves": [],
@@ -84,6 +91,7 @@ DEFAULT_PROFILE = {
     "double_strike_propagator_cards": [],
     "roaming_throne_chosen_type": None,
     "win_creature_count_threshold": None,
+    "win_creature_min_cmc": None,
 }
 
 
@@ -364,6 +372,22 @@ _CARD_OVERRIDES = {
         # Multikicker {1}, assume a 4-player pod: the first target is free,
         # then +{1} per additional opponent to hit all 3.
         "mana_cost": "{X}{2}{R}{R}",
+    },
+    "Esika, God of the Tree // The Prismatic Bridge": {
+        # This deck's whole plan is the back face's upkeep trigger -- always
+        # cast (and played as commander) as The Prismatic Bridge, never as
+        # the front face's mana-dork mode. See profile
+        # esika_god_of_the_tree_the_prismatic_bridge.json.
+        "type_line": "Legendary Enchantment",
+        "mana_cost": "{W}{U}{B}{R}{G}",
+        "cmc": 5,
+        "oracle_text": (
+            "At the beginning of your upkeep, reveal cards from the top of your library "
+            "until you reveal a creature or planeswalker card. Put that card onto the "
+            "battlefield and the rest on the bottom of your library in a random order."
+        ),
+        "power": None,
+        "toughness": None,
     },
 }
 
@@ -1239,6 +1263,142 @@ def _run_combat_step(profile, turn, commander_card, battlefield_creatures, battl
     return tribal_token_count + new_tokens, new_tokens
 
 
+# ---------------------------------------------------------------------------
+# Upkeep-reveal-until-creature-or-planeswalker engine (The Prismatic Bridge-
+# style decks) -- entirely self-gating: it only ever fires if a permanent
+# bearing this exact ability is actually in play, so no profile flag is
+# needed to turn it on for decks that don't run one.
+# ---------------------------------------------------------------------------
+
+_UPKEEP_REVEAL_UNTIL_RE = re.compile(
+    r"at the beginning of your upkeep, reveal cards from the top of your library "
+    r"until you reveal a creature or planeswalker card\. put that card onto the battlefield",
+    re.I,
+)
+
+
+def _has_upkeep_reveal_trigger(battlefield_permanent_cards):
+    return any(_UPKEEP_REVEAL_UNTIL_RE.search(c["oracle_text"]) for c in battlefield_permanent_cards)
+
+
+def _resolve_upkeep_reveal(library):
+    """Reveals from the top of `library` (mutated in place) until a
+    Creature or Planeswalker card, puts it into play (returned), and moves
+    everything revealed along the way to the bottom. `library` is already a
+    randomly shuffled list by construction, so appending the misses
+    satisfies "the rest in a random order" without a fresh shuffle. Returns
+    None if the library runs out first."""
+    misses = []
+    found = None
+    while library:
+        card = library.pop(0)
+        if "Creature" in card["type_line"] or "Planeswalker" in card["type_line"]:
+            found = card
+            break
+        misses.append(card)
+    library.extend(misses)
+    return found
+
+
+# Name-keyed (mirrors SAC_LANDS_RAMP_SPELLS/ETB_DRAW_TRIGGERS's precedent)
+# since each "copy target triggered ability you control" source has a
+# genuinely different cost/multiplier/restriction shape. "generic"/"colored"
+# describe a mana cost paid via the same try_pay() helper used everywhere
+# else; "tap_other_creatures" is a nonmana alt-cost (Kirol); "max_uses" is a
+# lifetime cap across the whole game (Peter Parker's Camera's film
+# counters); "is_creature" gates on summoning sickness. Gogo (scales with
+# however much mana is left) and Vantress Visions (a one-shot instant cast
+# from hand, not a repeatable permanent) don't fit this shape and are
+# special-cased directly in _run_upkeep_phase.
+COPY_TRIGGER_SOURCES = {
+    "Strionic Resonator": {"generic": 2, "colored": [], "multiplier": 1, "max_uses": None, "is_creature": False},
+    "Lithoform Engine": {"generic": 2, "colored": [], "multiplier": 1, "max_uses": None, "is_creature": False},
+    "Weaver of Harmony": {"generic": 0, "colored": ["G"], "multiplier": 1, "max_uses": None, "is_creature": True},
+    "Adric, Mathematical Genius": {"generic": 2, "colored": ["U"], "multiplier": 1, "max_uses": None, "is_creature": True},
+    "Peter Parker's Camera": {"generic": 2, "colored": [], "multiplier": 1, "max_uses": 3, "is_creature": False},
+    "Mister Fantastic": {"generic": 0, "colored": ["R", "G", "W", "U"], "multiplier": 2, "max_uses": None, "is_creature": True},
+    "Kirol, Attentive First-Year": {"tap_other_creatures": 2, "multiplier": 1, "max_uses": None, "is_creature": True},
+}
+
+
+def _run_upkeep_phase(turn, battlefield_permanents, battlefield_permanent_cards, battlefield_creatures,
+                       battlefield_sources, hand, graveyard, graveyard_cards, library,
+                       copy_source_uses_remaining):
+    """Resolves The Prismatic Bridge's upkeep trigger plus every copy of it
+    the board can afford, using only mana from permanents already in play
+    at the start of the turn (this turn's land drop hasn't happened yet,
+    matching real upkeep timing). Returns (upkeep_available, names_found)
+    where upkeep_available is what's left of that mana pool for the rest of
+    the turn to use, and names_found lists what got put into play (for
+    frame capture). Mutates battlefield_permanents/battlefield_permanent_cards/
+    battlefield_creatures/hand/graveyard/graveyard_cards/library in place."""
+    upkeep_available = list(battlefield_sources)
+    perm_names = {p.replace(" (copy)", "") for p in battlefield_permanents}
+    num_activations = 1  # the Bridge's own base trigger
+
+    def _is_unsick_creature(name):
+        entry = next((c for c in battlefield_creatures if c["name"] == name), None)
+        return entry is not None and entry["entered_turn"] < turn
+
+    for source_name, cfg in COPY_TRIGGER_SOURCES.items():
+        if source_name not in perm_names:
+            continue
+        uses_left = copy_source_uses_remaining.get(source_name, cfg["max_uses"])
+        if cfg["max_uses"] is not None and uses_left is not None and uses_left <= 0:
+            continue
+        if cfg["is_creature"] and not _is_unsick_creature(source_name):
+            continue
+        if "tap_other_creatures" in cfg:
+            others = [c for c in battlefield_creatures if c["name"] != source_name]
+            if len(others) < cfg["tap_other_creatures"]:
+                continue
+        else:
+            pips = [{c} for c in cfg["colored"]]
+            paid = try_pay(upkeep_available, cfg["generic"], pips)
+            if paid is None:
+                continue
+            upkeep_available = [c for i, c in enumerate(upkeep_available) if i not in paid]
+        num_activations += cfg["multiplier"]
+        if cfg["max_uses"] is not None:
+            copy_source_uses_remaining[source_name] = (uses_left if uses_left is not None else cfg["max_uses"]) - 1
+
+    # Vantress Visions (Virtue of Knowledge's Adventure side) -- a one-shot
+    # instant held up and cast in response to the upkeep trigger.
+    vantress = next((c for c in hand if c["name"] == "Virtue of Knowledge // Vantress Visions"), None)
+    if vantress is not None:
+        paid = try_pay(upkeep_available, 1, [{"U"}])
+        if paid is not None:
+            upkeep_available = [c for i, c in enumerate(upkeep_available) if i not in paid]
+            hand.remove(vantress)
+            graveyard.append(vantress["name"])
+            graveyard_cards.append(vantress)
+            num_activations += 1
+
+    # Gogo, Master of Mimicry -- {X}{X} to copy X times; goes last and
+    # dumps whatever's left, same "go big since it's the last thing this
+    # turn" philosophy as the engine's X-spell handling.
+    if "Gogo, Master of Mimicry" in perm_names and _is_unsick_creature("Gogo, Master of Mimicry"):
+        x_value = len(upkeep_available) // 2
+        if x_value > 0:
+            upkeep_available = []
+            num_activations += x_value
+
+    names_found = []
+    for _ in range(num_activations):
+        found = _resolve_upkeep_reveal(library)
+        if found is None:
+            break
+        battlefield_permanents.append(found["name"])
+        battlefield_permanent_cards.append(found)
+        if "Creature" in found["type_line"]:
+            battlefield_creatures.append(
+                {"name": found["name"], "card": found, "entered_turn": turn, "has_double_strike": False}
+            )
+        names_found.append(found["name"])
+
+    return upkeep_available, names_found
+
+
 def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, profile=None, capture_frames=False):
     """Plays one solitaire game. `deck_cards` is the 99/100-card library
     (each a dict from fetch_card_data, annotated with a precomputed
@@ -1302,6 +1462,8 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     graveyard_lands = []  # land card dicts sacrificed and eligible for recursion
     battlefield_land_cards = {}  # land name -> card dict, for sac-to-ramp spells to look up what they're sacrificing
     win_creature_threshold = profile.get("win_creature_count_threshold")
+    win_creature_min_cmc = profile.get("win_creature_min_cmc")
+    copy_source_uses_remaining = {}  # persists across turns -- Peter Parker's Camera's lifetime 3-use cap
 
     for turn in range(1, max_turns + 1):
         drew_card = None
@@ -1311,6 +1473,20 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
         cast_this_turn_names = set()
         etb_fired_this_turn = set()
         rumor_gatherer_state = {"count": 0}
+
+        # The Prismatic Bridge-style upkeep trigger (see DEFAULT_PROFILE
+        # notes near win_creature_min_cmc) -- happens before the draw step,
+        # using only mana from permanents already in play (this turn's land
+        # drop hasn't happened yet). upkeep_leftover_mana threads whatever's
+        # left into the casting loop's mana pool below.
+        upkeep_source_count = len(battlefield_sources)
+        upkeep_leftover_mana = None
+        upkeep_hits = []
+        if _has_upkeep_reveal_trigger(battlefield_permanent_cards):
+            upkeep_leftover_mana, upkeep_hits = _run_upkeep_phase(
+                turn, battlefield_permanents, battlefield_permanent_cards, battlefield_creatures,
+                battlefield_sources, hand, graveyard, graveyard_cards, library, copy_source_uses_remaining
+            )
 
         if not (turn == 1 and on_the_play) and library:
             drawn = library.pop(0)
@@ -1377,7 +1553,13 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                     fetched_color = _apply_mana_source(mana_profile, battlefield_sources, [], hand, land["name"])
                 land_events.append({"name": land["name"], "fetched": fetched_color, "from_graveyard": False})
 
-        available = list(battlefield_sources)
+        if upkeep_leftover_mana is not None:
+            # Leftover upkeep-time mana plus whatever new sources this
+            # turn's land drop(s) added (battlefield_sources is append-only
+            # within a turn, so this slice is safe).
+            available = upkeep_leftover_mana + battlefield_sources[upkeep_source_count:]
+        else:
+            available = list(battlefield_sources)
         available, activated_now = _activate_costed_rocks(battlefield_costed_rocks, available)
         activated_rock_names.extend(activated_now)
         flashback_mode = None  # "single" (Snapcaster) | "all" (Past in Flames) | "escape" (Underworld Breach)
@@ -1512,7 +1694,11 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 is_copied = extra_copies > 0
 
                 permanents_added = 0
-                is_creature_permanent = is_commander_cast or "Creature" in card["type_line"]
+                # NOT "is_commander_cast or ..." -- a commander that's a
+                # noncreature permanent (e.g. an MDFC commander cast as its
+                # Enchantment back face) shouldn't get counted as a creature
+                # just for being the commander.
+                is_creature_permanent = "Creature" in card["type_line"]
                 new_creature_entries = []
                 if is_commander_cast or _is_permanent_type(card["type_line"]):
                     battlefield_permanents.append(card["name"])
@@ -1663,9 +1849,17 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 win_turn = turn
                 win_label = f"made the {win_tribal_threshold}th {win_tribal_type}!"
 
-        if win_turn is None and win_creature_threshold is not None and len(battlefield_creatures) >= win_creature_threshold:
-            win_turn = turn
-            win_label = f"controls {win_creature_threshold} creatures!"
+        if win_turn is None and win_creature_threshold is not None:
+            qualifying_creatures = [
+                c for c in battlefield_creatures
+                if win_creature_min_cmc is None or c["card"].get("cmc", 0) >= win_creature_min_cmc
+            ]
+            if len(qualifying_creatures) >= win_creature_threshold:
+                win_turn = turn
+                win_label = (
+                    f"controls {win_creature_threshold} creatures!" if win_creature_min_cmc is None
+                    else f"controls {win_creature_threshold} big creatures!"
+                )
 
         if capture_frames:
             # Everything produced this turn either got spent (on a fixed
@@ -1697,6 +1891,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "win_label": win_label if win_turn == turn else None,
                 "tribal_tokens_created": tribal_tokens_created_this_turn if win_tribal_type else None,
                 "tribal_token_count": tribal_token_count if win_tribal_type else None,
+                "upkeep_hits": upkeep_hits,
             })
 
         if win_turn is not None:

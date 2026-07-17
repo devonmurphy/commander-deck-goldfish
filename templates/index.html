@@ -567,6 +567,7 @@
           if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
         }
         if (f.tribal_tokens_created) parts.push(`Tokens made: ${f.tribal_tokens_created} (total ${f.tribal_token_count}).`);
+        if (f.upkeep_hits && f.upkeep_hits.length) parts.push(`Upkeep: ${f.upkeep_hits.join(', ')}.`);
         if (f.casts.length) {
           const castDescs = f.casts.map((c) => {
             let d = c.name;
