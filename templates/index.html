@@ -557,10 +557,11 @@
         }
         if (f.drew_card) parts.push(`Draw ${f.drew_card}.`);
         if (f.land) parts.push(`Land ${f.land.name}` + (f.land.fetched ? ` (fetched ${f.land.fetched})` : '') + '.');
-        if (!f.win_spell) {
+        if (!f.win_label) {
           parts.push(`Mana: ${f.mana_available_end}.`);
           if (f.treasures_banked_end) parts.push(`Treasures: ${f.treasures_banked_end}.`);
         }
+        if (f.tribal_tokens_created) parts.push(`Tokens made: ${f.tribal_tokens_created} (total ${f.tribal_token_count}).`);
         if (f.casts.length) {
           const castDescs = f.casts.map((c) => {
             let d = c.name;
@@ -575,8 +576,8 @@
           parts.push('Cast: (nothing).');
         }
         let line = escapeHtml(parts.join(' '));
-        if (f.win_spell) {
-          line = `<span class="win-line">${line} \u{1F3C6} WIN -- cast ${escapeHtml(f.win_spell)} for X=${f.win_x_value}!</span>`;
+        if (f.win_label) {
+          line = `<span class="win-line">${line} \u{1F3C6} WIN -- ${escapeHtml(f.win_label)}</span>`;
         }
         return line;
       }
@@ -639,8 +640,8 @@
       }
 
       function endOfTurnNarration(frame) {
-        if (frame.win_spell) {
-          return `<span class="win-line">\u{1F3C6} WIN -- cast ${escapeHtml(frame.win_spell)} for X=${frame.win_x_value}! `
+        if (frame.win_label) {
+          return `<span class="win-line">\u{1F3C6} WIN -- ${escapeHtml(frame.win_label)} `
             + `(${frame.mana_produced_this_turn} mana produced this turn)</span>`;
         }
         let text = `End of turn ${frame.turn} -- mana available next turn: ${frame.mana_available_end}`;
@@ -649,7 +650,7 @@
       }
 
       function renderWinBanner(frame) {
-        if (!frame.win_spell) {
+        if (!frame.win_label) {
           els.winBanner.style.display = 'none';
           els.winBanner.innerHTML = '';
           return;
@@ -657,19 +658,20 @@
         els.winBanner.innerHTML = '';
         els.winBanner.style.display = 'flex';
 
-        const wrap = document.createElement('div');
-        wrap.className = 'win-card-wrap';
-        wrap.appendChild(chip(frame.win_spell, ''));
-        const badge = document.createElement('div');
-        badge.className = 'mana-badge';
-        badge.textContent = `${frame.win_x_value} mana`;
-        wrap.appendChild(badge);
-        els.winBanner.appendChild(wrap);
+        if (frame.win_spell) {
+          const wrap = document.createElement('div');
+          wrap.className = 'win-card-wrap';
+          wrap.appendChild(chip(frame.win_spell, ''));
+          const badge = document.createElement('div');
+          badge.className = 'mana-badge';
+          badge.textContent = `${frame.win_x_value} mana`;
+          wrap.appendChild(badge);
+          els.winBanner.appendChild(wrap);
+        }
 
         const text = document.createElement('div');
         text.className = 'win-banner-text';
-        text.innerHTML = `\u{1F3C6} <strong>${escapeHtml(frame.win_spell)}</strong> cast for X=${frame.win_x_value} `
-          + `won the game on turn ${frame.turn}.`;
+        text.innerHTML = `\u{1F3C6} <strong>${escapeHtml(frame.win_label)}</strong> won the game on turn ${frame.turn}.`;
         els.winBanner.appendChild(text);
       }
 
@@ -787,7 +789,7 @@
 
           if (autoplay && stepIdx < steps.length) {
             stepTimer = setTimeout(runStep, stepDelay());
-          } else if (autoplay && chain && !frame.win_spell && currentTurn < frames.length - 1) {
+          } else if (autoplay && chain && !frame.win_label && currentTurn < frames.length - 1) {
             stepTimer = setTimeout(() => showTurn(currentTurn + 1, true, true), stepDelay());
           }
         }

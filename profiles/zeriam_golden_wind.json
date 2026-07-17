@@ -1,0 +1,21 @@
+{
+  "commander": "Zeriam, Golden Wind",
+  "win_tribal_token_type": "Griffin",
+  "win_tribal_token_threshold": 10,
+  "double_strike_auto_commander_cards": ["Flaming Fist"],
+  "double_strike_single_target_cards": [
+    "Twinblade Blessing",
+    "Battle Mastery",
+    "Genji Glove",
+    "Silverblade Paladin",
+    "Duelist's Heritage"
+  ],
+  "double_strike_blanket_cards": [
+    "True Conviction",
+    "Goring Ceratops",
+    "Sigarda's Vanguard",
+    "Akroma's Will"
+  ],
+  "double_strike_propagator_cards": ["Odric, Lunarch Marshal"],
+  "roaming_throne_chosen_type": "Griffin"
+}

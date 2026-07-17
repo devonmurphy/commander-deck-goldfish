@@ -37,6 +37,39 @@ this skill was written. As of writing, the fields are:
   the only supported kind is `"treasure"`. Use this for decks whose plan is
   clearly "stockpile mana rocks/treasures, then dump it all into one huge X
   spell" rather than spending ramp piecemeal.
+- `win_tribal_token_type` / `win_tribal_token_threshold`: for decks that win
+  by making N tokens of a creature type via combat damage (e.g. Zeriam,
+  Golden Wind: "make 10 Griffins") instead of casting a big X spell. Setting
+  these turns on a whole extra combat-simulation subsystem in `simulate.py`
+  (`_run_combat_step`) that's otherwise a complete no-op for every other
+  profile. The engine auto-detects the actual trigger ("whenever a Griffin
+  you control deals combat damage to a player, create ... token") from the
+  commander's oracle text via `_parse_tribal_combat_damage_trigger` -- these
+  two fields just say which tribe to count and when that count means "win."
+  Every creature without summoning sickness is assumed to attack unblocked
+  (no opponent/combat model exists otherwise). Token doublers ("create twice
+  that many tokens instead" -- Anointed Procession, Mondrak, etc.) are also
+  auto-detected from oracle text and stack multiplicatively.
+- `double_strike_auto_commander_cards` / `double_strike_single_target_cards`
+  / `double_strike_blanket_cards` / `double_strike_propagator_cards`: only
+  meaningful alongside `win_tribal_token_type`. Card names (by how they
+  grant double strike) that decide who has double strike each combat --
+  auto-commander (free, e.g. Flaming Fist), single-target (locks double
+  strike onto the commander first, then a random creature of the win tribe,
+  one per turn, e.g. Twinblade Blessing/Genji Glove), blanket (every
+  attacker gets it while in play, e.g. True Conviction), propagator (spreads
+  double strike to the whole team once any one creature has it, e.g. Odric,
+  Lunarch Marshal). See `profiles/zeriam_golden_wind.json` for a worked
+  example.
+- `roaming_throne_chosen_type`: if the deck runs Roaming Throne, the
+  creature type assumed chosen when it enters. Only has an effect when it
+  matches `win_tribal_token_type` -- doubles the tribal combat-damage
+  trigger itself (on top of any token doublers).
+
+Note: `simulate.py` does NOT track +1/+1 counters (e.g. from Cathars'
+Crusade) -- tokens are evaluated at their base printed power/toughness for
+any "draw when a small creature enters" triggers (`ETB_DRAW_TRIGGERS`).
+This is a deliberate simplification, not a gap to fix per-profile.
 
 Note what's already generic and does NOT need a profile entry: "Firebending
 N" is auto-detected from oracle text (see `_parse_firebending`); regular

@@ -43,11 +43,38 @@ PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile
 #     "treasure") that are banked and spent ONLY on X spells rather than on
 #     whatever's castable -- for decks planning to dump everything into one
 #     big X spell instead of using ramp piecemeal.
+#   win_tribal_token_type / win_tribal_token_threshold: for decks that win by
+#     making N tokens of a given creature type via combat damage (e.g. "make
+#     10 Griffins") rather than casting a big X spell. Setting these turns on
+#     a whole extra combat-simulation subsystem (see _run_combat_step) that's
+#     otherwise a complete no-op -- every other profile/deck is unaffected.
+#   double_strike_auto_commander_cards: cards that give the commander double
+#     strike automatically on attack, no action/mana needed (e.g. Flaming
+#     Fist's Background ability).
+#   double_strike_single_target_cards: cards that, once in play, let the
+#     pilot lock double strike onto one creature per turn -- the commander
+#     first if she doesn't have it yet, else a random creature of the win
+#     tribe.
+#   double_strike_blanket_cards: cards that give every attacking creature
+#     double strike for the turn while in play (or, for one-shot instants,
+#     the turn they're cast).
+#   double_strike_propagator_cards: cards (e.g. Odric) that give every
+#     attacker double strike once ANY creature you control already has it.
+#   roaming_throne_chosen_type: if the deck runs Roaming Throne, the creature
+#     type assumed chosen -- when it matches win_tribal_token_type, doubles
+#     the tribal combat-damage trigger.
 DEFAULT_PROFILE = {
     "commander": None,
     "hold_until_commander_resolves": [],
     "commander_copies_spells_while_attacking": False,
     "reserve_mana_kinds_for_x_spells": [],
+    "win_tribal_token_type": None,
+    "win_tribal_token_threshold": None,
+    "double_strike_auto_commander_cards": [],
+    "double_strike_single_target_cards": [],
+    "double_strike_blanket_cards": [],
+    "double_strike_propagator_cards": [],
+    "roaming_throne_chosen_type": None,
 }
 
 
@@ -112,6 +139,16 @@ _NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "fi
 
 def _word_to_number(word):
     return int(word) if word.isdigit() else _NUMBER_WORDS.get(word, 1)
+
+
+def _to_int_or_none(value):
+    """Scryfall power/toughness are strings, and can be non-numeric ("*",
+    "1+*") for variable-P/T creatures -- treat those as unknown rather than
+    guessing, so ETB-draw-trigger power checks just don't fire for them."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +273,15 @@ def _parse_scryfall_card(card):
     mana_cost = card.get("mana_cost", "")
     cmc = card.get("cmc", 0)
     oracle_text = card.get("oracle_text") or ""
+    power = card.get("power")
+    toughness = card.get("toughness")
     if not mana_cost and card.get("card_faces"):
         front = card["card_faces"][0]
         mana_cost = front.get("mana_cost", "") or mana_cost
         cmc = front.get("cmc", cmc)
         oracle_text = oracle_text or front.get("oracle_text") or ""
+        power = power if power is not None else front.get("power")
+        toughness = toughness if toughness is not None else front.get("toughness")
 
     image_uris = card.get("image_uris")
     if image_uris:
@@ -263,6 +304,8 @@ def _parse_scryfall_card(card):
         "color_identity": card.get("color_identity", []),
         "produced_mana": card.get("produced_mana"),
         "image_url": image_url,
+        "power": _to_int_or_none(power),
+        "toughness": _to_int_or_none(toughness),
     }
     return _apply_card_overrides(parsed)
 
@@ -738,6 +781,64 @@ def _parse_firebending(oracle_text):
     return int(match.group(1)) if match else 0
 
 
+_TRIBAL_COMBAT_DAMAGE_RE = re.compile(
+    r"whenever an? (\w+) you control deals combat damage to a player, "
+    r"create (a|an|one|two|three|four|five|six|\d+) [^.]*?\btokens?\b",
+    re.I,
+)
+
+
+def _parse_tribal_combat_damage_trigger(oracle_text):
+    """'Whenever a Griffin you control deals combat damage to a player,
+    create a 2/2 white Griffin creature token with flying.' style triggers
+    -- returns {"tribe": "Griffin", "tokens": 1} or None. Only meaningful
+    when a profile's win_tribal_token_type turns on combat simulation."""
+    match = _TRIBAL_COMBAT_DAMAGE_RE.search(oracle_text)
+    if not match:
+        return None
+    return {"tribe": match.group(1), "tokens": _word_to_number(match.group(2).lower())}
+
+
+# Real wording shared verbatim by every "token doubler" printed so far
+# (Anointed Procession, Mondrak, Elspeth Storm Slayer, Exalted Sunborn) --
+# generic and safe to auto-detect rather than listing by name. Multiple
+# doublers stack multiplicatively (2**n), matching how stacked replacement
+# effects actually resolve.
+_TOKEN_DOUBLER_RE = re.compile(r"twice that many.*tokens?.*instead", re.I)
+
+# "Creatures you control are every creature type" (Maskwood Nexus) --
+# effectively makes every creature you control a Changeling for tribal
+# trigger purposes.
+_ALL_CREATURE_TYPES_RE = re.compile(r"creatures you control are every creature type", re.I)
+
+
+def _is_tribal_type(card, tribe, changeling_active):
+    """Whether `card` counts as `tribe` for combat-trigger purposes: it
+    literally has that creature type, it has Changeling itself, or a
+    Maskwood-Nexus-style effect is making everything every type."""
+    if changeling_active or "changeling" in card["oracle_text"].lower():
+        return True
+    return tribe.lower() in card["type_line"].lower()
+
+
+# Small lookup table (mirrors _CARD_OVERRIDES's precedent) for "draw a card
+# when a small creature you control enters" static abilities -- these react
+# to OTHER permanents entering, which doesn't fit the existing "draw on cast"
+# profile (resolve_draw_profile) at all. "condition" is checked against a
+# creature token's printed power/toughness/mana value (Cathars' Crusade-style
+# +1/+1 counters are NOT tracked -- documented simplification, see plan/
+# README). "cost" is generic mana optionally paid from that turn's leftover
+# floating pool; "once_per_turn" caps it to one trigger regardless of how
+# many creatures entered.
+ETB_DRAW_TRIGGERS = {
+    "Mentor of the Meek": {"condition": "power_le_2", "cost": 1, "once_per_turn": False},
+    "Welcoming Vampire": {"condition": "power_le_2", "cost": 0, "once_per_turn": True},
+    "Enduring Innocence": {"condition": "power_le_2", "cost": 0, "once_per_turn": True},
+    "Symmetry Matrix": {"condition": "power_eq_toughness", "cost": 1, "once_per_turn": False},
+    "Tocasia's Welcome": {"condition": "mv_le_3", "cost": 0, "once_per_turn": True},
+}
+
+
 def _matches_hold_tag(card, tag):
     tag_lower = tag.lower()
     return tag_lower in card["type_line"].lower() or tag_lower in card["oracle_text"].lower()
@@ -805,6 +906,168 @@ WIN_X_THRESHOLD = 8  # casting an X spell for this much or more counts as a "win
 WIN_EXCLUDED_CARDS = {"Shellshock", "Street Spasm", "Reality Spasm"}
 
 
+# ---------------------------------------------------------------------------
+# Tribal combat + token win condition (Zeriam, Golden Wind-style decks) --
+# entirely opt-in via a profile's win_tribal_token_type. Every other deck
+# never touches any of this.
+# ---------------------------------------------------------------------------
+
+def _make_tribal_token_card(tribe):
+    """Synthetic card dict for a combat-created tribal token (e.g. Zeriam's
+    2/2 Griffin), shaped like a real card dict so it works everywhere a
+    parsed Scryfall card would (battlefield_permanent_cards, frame capture,
+    ETB-trigger checks)."""
+    return {
+        "name": tribe,
+        "type_line": f"Creature Token — {tribe}",
+        "is_land": False,
+        "mana_cost": "",
+        "cmc": 0,
+        "oracle_text": "Flying",
+        "color_identity": [],
+        "produced_mana": None,
+        "image_url": None,
+        "power": 2,
+        "toughness": 2,
+        "_mana_profile": None,
+        "_draw_profile": None,
+        "_untap_lands": None,
+    }
+
+
+def _etb_condition_met(entering_card, condition):
+    power, toughness = entering_card.get("power"), entering_card.get("toughness")
+    if condition == "power_le_2":
+        return power is not None and power <= 2
+    if condition == "power_eq_toughness":
+        return power is not None and toughness is not None and power == toughness
+    if condition == "mv_le_3":
+        return entering_card.get("cmc", 0) <= 3
+    return False
+
+
+def _fire_etb_draw_triggers(entering_card, battlefield_permanents, battlefield_permanent_cards,
+                             hand, library, available, etb_fired_this_turn, rumor_gatherer_state):
+    """Fires "whenever another creature you control [with some condition]
+    enters, draw a card" static triggers (ETB_DRAW_TRIGGERS) plus Rumor
+    Gatherer's "second creature ETB this turn draws instead of scries"
+    variant, for ONE entering creature. Mutates hand/library/available/
+    etb_fired_this_turn/rumor_gatherer_state in place; draws are applied
+    directly (no separate frame bookkeeping -- these show up the same as
+    any other card in hand)."""
+    for source_name, source_card in zip(battlefield_permanents, battlefield_permanent_cards):
+        if source_card is entering_card:
+            continue  # "another creature" -- can't trigger off its own ETB
+        base_name = source_name.replace(" (copy)", "")
+        rule = ETB_DRAW_TRIGGERS.get(base_name)
+        if rule:
+            if not _etb_condition_met(entering_card, rule["condition"]):
+                continue
+            if rule["once_per_turn"] and source_name in etb_fired_this_turn:
+                continue
+            if rule["cost"] > 0:
+                if len(available) < rule["cost"]:
+                    continue
+                del available[:rule["cost"]]
+            if library:
+                hand.append(library.pop(0))
+            if rule["once_per_turn"]:
+                etb_fired_this_turn.add(source_name)
+        elif base_name == "Rumor Gatherer":
+            rumor_gatherer_state["count"] += 1
+            if rumor_gatherer_state["count"] == 2 and library:
+                hand.append(library.pop(0))
+
+
+def _run_combat_step(profile, turn, commander_card, battlefield_creatures, battlefield_permanents,
+                      battlefield_permanent_cards, available, hand, library, cast_this_turn_names,
+                      tribal_token_count, tribal_trigger, rng, etb_fired_this_turn, rumor_gatherer_state):
+    """Simulates one turn's combat for a tribal-combat-token win condition:
+    every creature without summoning sickness attacks unopposed (consistent
+    with the engine's existing no-opponent/no-blockers model). Whichever of
+    the profile's double-strike sources are in play determine how many
+    creatures have double strike this combat (see DEFAULT_PROFILE);
+    double-struck tribal attackers trigger the tribal combat-damage ability
+    twice instead of once. Roaming Throne and token-doubler permanents then
+    multiply the resulting token count. Returns
+    (new_tribal_token_count, tokens_created_this_combat) -- mutates
+    battlefield_creatures/battlefield_permanents/battlefield_permanent_cards/
+    hand/library in place."""
+    tribe = profile.get("win_tribal_token_type")
+    if not tribe or tribal_trigger is None:
+        return tribal_token_count, 0
+
+    perm_names = {p.replace(" (copy)", "") for p in battlefield_permanents}
+    changeling_active = any(_ALL_CREATURE_TYPES_RE.search(c["oracle_text"]) for c in battlefield_permanent_cards)
+
+    commander_entry = next(
+        (c for c in battlefield_creatures if commander_card is not None and c["card"] is commander_card), None
+    )
+
+    # 1. Double strike assignment for this combat.
+    if commander_entry and perm_names & set(profile.get("double_strike_auto_commander_cards", [])):
+        commander_entry["has_double_strike"] = True
+
+    any_has_double_strike = any(c["has_double_strike"] for c in battlefield_creatures)
+    blanket_cards = set(profile.get("double_strike_blanket_cards", []))
+    blanket_active = bool(perm_names & blanket_cards) or bool(cast_this_turn_names & blanket_cards)
+    propagator_active = bool(perm_names & set(profile.get("double_strike_propagator_cards", []))) and any_has_double_strike
+    blanket_this_combat = blanket_active or propagator_active
+
+    if not blanket_this_combat and (perm_names & set(profile.get("double_strike_single_target_cards", []))):
+        if commander_entry and not commander_entry["has_double_strike"]:
+            commander_entry["has_double_strike"] = True
+        else:
+            candidates = [
+                c for c in battlefield_creatures
+                if not c["has_double_strike"] and _is_tribal_type(c["card"], tribe, changeling_active)
+            ]
+            if candidates:
+                rng.choice(candidates)["has_double_strike"] = True
+
+    # 2. Attackers (no summoning sickness) and their trigger counts.
+    total_base_triggers = 0
+    for creature in battlefield_creatures:
+        if creature["entered_turn"] >= turn:
+            continue  # summoning sick, can't attack this turn
+        if not _is_tribal_type(creature["card"], tribe, changeling_active):
+            continue
+        has_double_strike = creature["has_double_strike"] or blanket_this_combat
+        total_base_triggers += 2 if has_double_strike else 1
+
+    if total_base_triggers == 0:
+        return tribal_token_count, 0
+
+    # 3. Roaming Throne doubles the tribal trigger itself, if it's tuned to this tribe.
+    roaming_throne_multiplier = 1
+    if "Roaming Throne" in perm_names and (profile.get("roaming_throne_chosen_type") or "").lower() == tribe.lower():
+        roaming_throne_multiplier = 2
+
+    # 4. Token doublers stack multiplicatively (real replacement-effect rules).
+    num_doublers = sum(1 for c in battlefield_permanent_cards if _TOKEN_DOUBLER_RE.search(c["oracle_text"]))
+
+    new_tokens = total_base_triggers * roaming_throne_multiplier * tribal_trigger["tokens"] * (2 ** num_doublers)
+
+    # 5. Create the tokens, fire their ETB draw triggers.
+    token_card = _make_tribal_token_card(tribe)
+    for _ in range(new_tokens):
+        battlefield_permanents.append(tribe)
+        battlefield_permanent_cards.append(token_card)
+        battlefield_creatures.append(
+            {"name": tribe, "card": token_card, "entered_turn": turn, "has_double_strike": False}
+        )
+        _fire_etb_draw_triggers(
+            token_card, battlefield_permanents, battlefield_permanent_cards,
+            hand, library, available, etb_fired_this_turn, rumor_gatherer_state
+        )
+
+    # 6. Bennie Bracks: draw at end step if a token was created this turn.
+    if "Bennie Bracks, Zoologist" in perm_names and library:
+        hand.append(library.pop(0))
+
+    return tribal_token_count + new_tokens, new_tokens
+
+
 def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, profile=None, capture_frames=False):
     """Plays one solitaire game. `deck_cards` is the 99/100-card library
     (each a dict from fetch_card_data, annotated with a precomputed
@@ -821,7 +1084,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     UI's game player -- skipped by default since most games are only used
     for aggregate stats. Returns (first_cast_turn, frames_or_None, win_turn)
     where win_turn is the first turn an X spell was cast for
-    WIN_X_THRESHOLD+ (or None if it never happened)."""
+    WIN_X_THRESHOLD+, OR (if the profile sets win_tribal_token_type) the
+    first turn a combat-created token count crossed
+    win_tribal_token_threshold -- None if neither ever happened."""
     profile = profile or DEFAULT_PROFILE
     hold_tags = profile.get("hold_until_commander_resolves", [])
     copies_while_attacking = profile.get("commander_copies_spells_while_attacking", False)
@@ -842,16 +1107,31 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
     win_turn = None
     win_spell_name = None
     win_x_value = None
+    win_label = None
     commander_cast_turn = None
     firebending_amount = (commander_card or {}).get("_firebending", 0)
     treasure_count = 0  # banked across turns
     treasure_colors = set()
+
+    # Tribal-combat-token win condition (see DEFAULT_PROFILE) -- a complete
+    # no-op for decks whose profile doesn't set win_tribal_token_type.
+    battlefield_creatures = []  # [{"name","card","entered_turn","has_double_strike"}], creatures only
+    win_tribal_type = profile.get("win_tribal_token_type")
+    win_tribal_threshold = profile.get("win_tribal_token_threshold")
+    tribal_trigger = (
+        _parse_tribal_combat_damage_trigger((commander_card or {}).get("oracle_text", ""))
+        if win_tribal_type else None
+    )
+    tribal_token_count = 0  # cumulative tokens of win_tribal_type created via combat
 
     for turn in range(1, max_turns + 1):
         drew_card = None
         land_event = None
         cast_events = []
         activated_rock_names = []
+        cast_this_turn_names = set()
+        etb_fired_this_turn = set()
+        rumor_gatherer_state = {"count": 0}
 
         if not (turn == 1 and on_the_play) and library:
             drawn = library.pop(0)
@@ -964,6 +1244,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                         win_turn = turn
                         win_spell_name = card["name"]
                         win_x_value = x_value
+                        win_label = f"cast {card['name']} for X={x_value}!"
 
                 is_commander_cast = commander_card is not None and card is commander_card
                 from_graveyard = any(card is g for g in graveyard_cards)
@@ -987,6 +1268,7 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
 
                 if card["name"] not in first_cast_turn:
                     first_cast_turn[card["name"]] = turn
+                cast_this_turn_names.add(card["name"])
 
                 # How many total times this resolves: 1 = no copying, 2+ if
                 # the commander's attack trigger (and Veyran/Twinning Staff
@@ -999,10 +1281,16 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 is_copied = extra_copies > 0
 
                 permanents_added = 0
+                is_creature_permanent = is_commander_cast or "Creature" in card["type_line"]
+                new_creature_entries = []
                 if is_commander_cast or _is_permanent_type(card["type_line"]):
                     battlefield_permanents.append(card["name"])
                     battlefield_permanent_cards.append(card)
                     permanents_added = 1
+                    if is_creature_permanent:
+                        entry = {"name": card["name"], "card": card, "entered_turn": turn, "has_double_strike": False}
+                        battlefield_creatures.append(entry)
+                        new_creature_entries.append(entry)
                     # The legend rule: extra copies of a Legendary permanent
                     # get sacrificed immediately, so only one ever sticks
                     # around no matter how many times it was copied.
@@ -1011,9 +1299,21 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                             battlefield_permanents.append(card["name"] + " (copy)")
                             battlefield_permanent_cards.append(card)
                             permanents_added += 1
+                            if is_creature_permanent:
+                                entry = {"name": card["name"] + " (copy)", "card": card,
+                                         "entered_turn": turn, "has_double_strike": False}
+                                battlefield_creatures.append(entry)
+                                new_creature_entries.append(entry)
                 elif not from_graveyard:
                     graveyard.append(card["name"])  # Instants/Sorceries go to the graveyard once resolved
                     graveyard_cards.append(card)
+
+                if win_tribal_type:
+                    for _ in new_creature_entries:
+                        _fire_etb_draw_triggers(
+                            card, battlefield_permanents, battlefield_permanent_cards,
+                            hand, library, available, etb_fired_this_turn, rumor_gatherer_state
+                        )
 
                 mana_profile = card.get("_mana_profile")
                 if mana_profile:
@@ -1095,6 +1395,17 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 progressed = True
                 break
 
+        tribal_tokens_created_this_turn = 0
+        if win_tribal_type:
+            tribal_token_count, tribal_tokens_created_this_turn = _run_combat_step(
+                profile, turn, commander_card, battlefield_creatures, battlefield_permanents,
+                battlefield_permanent_cards, available, hand, library, cast_this_turn_names,
+                tribal_token_count, tribal_trigger, rng, etb_fired_this_turn, rumor_gatherer_state
+            )
+            if win_turn is None and win_tribal_threshold is not None and tribal_token_count >= win_tribal_threshold:
+                win_turn = turn
+                win_label = f"made the {win_tribal_threshold}th {win_tribal_type}!"
+
         if capture_frames:
             # Everything produced this turn either got spent (on a fixed
             # cost or dumped into an X) or is sitting unspent at the end --
@@ -1122,6 +1433,9 @@ def simulate_game(deck_cards, commander_card, max_turns, rng, on_the_play=True, 
                 "graveyard": list(graveyard),
                 "win_spell": win_spell_name if win_turn == turn else None,
                 "win_x_value": win_x_value if win_turn == turn else None,
+                "win_label": win_label if win_turn == turn else None,
+                "tribal_tokens_created": tribal_tokens_created_this_turn if win_tribal_type else None,
+                "tribal_token_count": tribal_token_count if win_tribal_type else None,
             })
 
         if win_turn is not None:
