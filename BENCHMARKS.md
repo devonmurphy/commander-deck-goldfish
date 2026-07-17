@@ -7,7 +7,7 @@ profiles/the engine evolve.
 
 | Deck | Commander | Win Rate | Avg Win Turn | Median | Fastest |
 |---|---|---|---|---|---|
-| [Zeriam, Golden Wind](https://archidekt.com/decks/23913397/zeriam_golden_wind) | Zeriam, Golden Wind | 100.0% | 6.76 | 7.0 | 4 |
+| [Zeriam, Golden Wind](https://archidekt.com/decks/23913397/zeriam_golden_wind) | Zeriam, Golden Wind | 100.0% | 7.45 | 7.0 | 5 |
 | [Azula Always Lies](https://archidekt.com/decks/23371168/azula_always_lies) | Fire Lord Azula | 87.3% | 8.37 | 8.0 | 4 |
 | [Titania is Back](https://archidekt.com/decks/23684522/titania_is_back) | Titania, Protector of Argoth | 97.0% | 8.60 | 8.0 | 4 |
 | [The Prismatic Bridge to Nowhere](https://archidekt.com/decks/1064159/the_prismatic_bridge_to_nowhere) | Esika, God of the Tree // The Prismatic Bridge | 92.7% | 9.86 | 10.0 | 6 |
@@ -15,7 +15,7 @@ profiles/the engine evolve.
 ## Win conditions, one line each
 
 - **Zeriam**: double strike on the commander, then a random Griffin each
-  turn after, snowballing combat-damage triggers -- win at 10 Griffin
+  turn after, snowballing combat-damage triggers -- win at 20 Griffin
   tokens (`win_tribal_token_type`/`win_tribal_token_threshold`).
 - **Fire Lord Azula**: ramp into one huge X spell (`WIN_X_THRESHOLD`, the
   engine's generic default win condition).

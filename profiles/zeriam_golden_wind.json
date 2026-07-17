@@ -1,7 +1,7 @@
 {
   "commander": "Zeriam, Golden Wind",
   "win_tribal_token_type": "Griffin",
-  "win_tribal_token_threshold": 10,
+  "win_tribal_token_threshold": 20,
   "double_strike_auto_commander_cards": ["Flaming Fist"],
   "double_strike_single_target_cards": [
     "Twinblade Blessing",
