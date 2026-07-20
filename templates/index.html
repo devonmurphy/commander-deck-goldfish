@@ -264,6 +264,20 @@
     <p class="subtitle">Paste a decklist (or an Archidekt deck URL), and this plays it out solo, many times, to see how often each card is actually castable by a given turn.</p>
 
     <form class="panel" method="post" id="goldfish-form">
+      {% if saved_decks %}
+      <div class="full">
+        <label for="saved-deck">Saved deck</label>
+        <select id="saved-deck">
+          <option value="">-- pick a saved deck --</option>
+          {% for deck in saved_decks %}
+          <option value="{{ deck.decklist_url }}" {% if form_values.decklist == deck.decklist_url %}selected{% endif %}>
+            {{ deck.name or deck.commander }}
+          </option>
+          {% endfor %}
+        </select>
+        <div class="hint">Picks a deck from profiles/ so you don't have to paste the URL again.</div>
+      </div>
+      {% endif %}
       <div class="full">
         <label for="decklist">Decklist or Archidekt deck URL</label>
         <textarea id="decklist" name="decklist" placeholder="1x Sol Ring&#10;1x Command Tower&#10;...&#10;&#10;or paste an https://archidekt.com/decks/... URL" required>{{ form_values.decklist }}</textarea>
@@ -508,6 +522,15 @@
       document.getElementById('goldfish-btn').disabled = true;
       document.getElementById('loading-overlay').classList.add('show');
     });
+
+    const savedDeckSelect = document.getElementById('saved-deck');
+    if (savedDeckSelect) {
+      savedDeckSelect.addEventListener('change', function () {
+        if (!savedDeckSelect.value) return;
+        document.getElementById('decklist').value = savedDeckSelect.value;
+        document.getElementById('commander').value = '';
+      });
+    }
 
     {% if result %}
     (function setUpGamePlayer() {

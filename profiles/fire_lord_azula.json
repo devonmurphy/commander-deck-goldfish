@@ -1,4 +1,6 @@
 {
+  "name": "Azula Always Lies",
+  "decklist_url": "https://archidekt.com/decks/23371168/azula_always_lies",
   "commander": "Fire Lord Azula",
   "hold_until_commander_resolves": ["Instant", "Flash"],
   "commander_copies_spells_while_attacking": true,

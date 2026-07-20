@@ -35,6 +35,14 @@ def _int_field(form, name, default, minimum=1):
     return value
 
 
+def _saved_decks():
+    """Profiles that carry a "decklist_url" (and "name") show up in the
+    web UI's saved-deck dropdown -- everything else about a profile is
+    simulation behavior, not a UI concern, so this is the only bit of
+    profile data the app layer reads directly."""
+    return [p for p in sim.list_profiles() if p.get("decklist_url")]
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     form_values = {
@@ -45,6 +53,10 @@ def index():
     }
     result = None
     error = None
+
+    if request.method == "GET" and request.args.get("decklist"):
+        form_values["decklist"] = request.args.get("decklist", "").strip()
+        form_values["commander"] = request.args.get("commander", "").strip()
 
     if request.method == "POST":
         form_values["decklist"] = request.form.get("decklist", "").strip()
@@ -67,7 +79,9 @@ def index():
         except Exception as e:
             error = f"Something went wrong fetching card data: {e}"
 
-    return render_template("index.html", form_values=form_values, result=result, error=error)
+    return render_template(
+        "index.html", form_values=form_values, result=result, error=error, saved_decks=_saved_decks()
+    )
 
 
 @app.route("/replay", methods=["POST"])
